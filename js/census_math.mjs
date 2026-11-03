@@ -167,6 +167,14 @@ export function splitP2(p) {
   return { algebraic, rest };
 }
 
+export function geometricRank(rhoGeom, records) {
+  // The rank of E over the function field of P^1 over the algebraic closure, by Shioda-Tate:
+  // rho(X over the closure) = 2 + sum over places of deg P (components - 1) + rank.
+  //   Input:  rhoGeom, the geometric Picard number; records, from parseFibres
+  //   Output: the rank, an integer
+  return rhoGeom - 2 - records.reduce((s, r) => s + r.deg * componentCycles(r.type, r.c).reduce((a, b) => a + b, 0), 0);
+}
+
 export function rowFromCsv(cols) {
   // One surface as an object with the column names of the site's search table.
   //   Input:  cols, the fields of a row of the site's row files
@@ -184,6 +192,7 @@ export function rowFromCsv(cols) {
     L_degree: lc.length - 1,
     L_sign: Number(L_sign), analytic_rank: Number(rank), zeta_sign: Number(zeta_sign),
     rho_f2: Number(rho_f2), rho_geom: Number(rho_geom),
+    rank_geom: geometricRank(Number(rho_geom), records),
     height: height === 'inf' ? null : Number(height), br_disc: Number(br_disc),
     pts_f2: Number(pts_f2), pts_f4: Number(pts_f4), pts_f8: Number(pts_f8),
     pts_f16: Number(pts_f16), pts_f32: Number(pts_f32),

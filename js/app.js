@@ -176,7 +176,7 @@ const sqlRows = async (conn, sql) => (await conn.query(sql)).toArray().map(r => 
 
 const A1 = [['zero', '0'], ['s2', 's^2'], ['st', 's*t'], ['irr', 's^2 + s*t + t^2']];
 const RANGES = [
-  ['analytic_rank', 'Rank of \\(E(\\mathbf F_2(T))\\)'], ['n_singular', 'Singular fibres'], ['n_reducible', 'Reducible fibres'],
+  ['analytic_rank', 'Rank of \\(E(\\mathbf F_2(T))\\)'], ['rank_geom', 'Rank of \\(E(\\overline{\\mathbf F}_2(T))\\)'], ['n_singular', 'Singular fibres'], ['n_reducible', 'Reducible fibres'],
   ['n_places', 'Bad places'], ['L_degree', 'Degree of \\(L\\)'], ['rho_f2', '\\(\\rho(X_{\\mathbf F_2})\\)'],
   ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)'], ['height', 'Height (finite)'],
   ['br_disc', '\\(\\#\\mathrm{Br}\\cdot|\\mathrm{disc}\\,\\mathrm{NS}|\\)'],
@@ -189,6 +189,7 @@ const COLUMNS = [
   ['config', 'Singular fibres', r => T(configTex(r.config)), true],
   ['torsion', 'Torsion', r => T(torsionTex(r.torsion)), true],
   ['analytic_rank', 'Rank of \\(E(\\mathbf F_2(T))\\)', r => r.analytic_rank, true],
+  ['rank_geom', 'Rank of \\(E(\\overline{\\mathbf F}_2(T))\\)', r => r.rank_geom, true],
   ['rho_f2', '\\(\\rho(X_{\\mathbf F_2})\\)', r => r.rho_f2, true],
   ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r => r.rho_geom, true],
   ['height', 'Height', r => heightText(r.height), true],
@@ -550,6 +551,7 @@ async function renderSurface(keyText) {
       fact('\\(a_1\\) class', T(a1Tex(r.a1))),
       fact('Torsion of \\(E(\\mathbf F_2(T))\\)', T(torsionTex(r.torsion))),
       fact('Rank of \\(E(\\mathbf F_2(T))\\)', r.analytic_rank),
+      fact('Rank of \\(E(\\overline{\\mathbf F}_2(T))\\)', r.rank_geom),
       fact('\\(\\rho(X_{\\mathbf F_2})\\)', r.rho_f2),
       fact('\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r.rho_geom),
       fact('Height', heightText(r.height)),
@@ -671,6 +673,7 @@ async function renderStats() {
 
     h('h2', {}, 'Mordell–Weil and L-function'),
     h('div', { class: 'charts' },
+      card('Rank of \\(E(\\overline{\\mathbf F}_2(T))\\)', String.raw`\(\rho(X_{\overline{\mathbf F}_2}) - 2 - \sum_v \deg v\,(m_v - 1)\), where \(m_v\) is the number of components of the fibre at \(v\) (Shioda–Tate).`, barChart(s.rank_geom, { xTitle: 'rank' })),
       card('Rank of \\(E(\\mathbf F_2(T))\\)', 'Computed as the order of vanishing of \\(L(E,s)\\) at \\(s=1\\), which equals the rank for these surfaces.', barChart(s.rank, { xTitle: 'rank' })),
       card('Torsion of \\(E(\\mathbf F_2(T))\\)', 'Subgroup of the Mordell–Weil group.', barChart([...s.torsion].sort((a, b) => byTorsionOrder(a[0], b[0])), { xTitle: 'torsion group' })),
       card('Degree of \\(L\\)', 'Equal to 20 minus the rank of the root lattices of the fibres.', barChart(s.L_degree, { xTitle: 'degree' })),
@@ -705,9 +708,9 @@ async function renderStats() {
 
     h('h2', {}, 'By class of a₁'),
     h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'by-a1' },
-      h('thead', {}, h('tr', {}, ['\\(a_1\\)', 'Surfaces', 'Mean rank', 'Mean singular', 'Max singular', 'Mean reducible', 'Max reducible', 'Mean \\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', 'Supersingular', 'Ordinary', 'Non-trivial torsion'].map((t, i) => h('th', { class: i === 0 ? 'left' : null }, labelNode(t))))),
+      h('thead', {}, h('tr', {}, ['\\(a_1\\)', 'Surfaces', 'Mean rank', 'Mean geometric rank', 'Mean singular', 'Max singular', 'Mean reducible', 'Max reducible', 'Mean \\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', 'Supersingular', 'Ordinary', 'Non-trivial torsion'].map((t, i) => h('th', { class: i === 0 ? 'left' : null }, labelNode(t))))),
       h('tbody', {}, Object.keys(m.expectedByA1).filter(a => s.byA1[a]).map(a => { const v = s.byA1[a]; return h('tr', {},
-        h('td', { class: 'left' }, T(a1Tex(a))), h('td', {}, fmt(v.models)), h('td', {}, (v.rank / v.models).toFixed(3)), h('td', {}, (v.singular / v.models).toFixed(2)), h('td', {}, v.maxSingular),
+        h('td', { class: 'left' }, T(a1Tex(a))), h('td', {}, fmt(v.models)), h('td', {}, (v.rank / v.models).toFixed(3)), h('td', {}, (v.rankGeom / v.models).toFixed(3)), h('td', {}, (v.singular / v.models).toFixed(2)), h('td', {}, v.maxSingular),
         h('td', {}, (v.reducible / v.models).toFixed(2)), h('td', {}, v.maxReducible), h('td', {}, (v.rho / v.models).toFixed(2)), h('td', {}, fmt(v.supersingular)), h('td', {}, fmt(v.ordinary)), h('td', {}, fmt(v.torsion))); })))));
 }
 

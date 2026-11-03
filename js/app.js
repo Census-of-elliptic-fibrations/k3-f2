@@ -176,7 +176,7 @@ const sqlRows = async (conn, sql) => (await conn.query(sql)).toArray().map(r => 
 
 const A1 = [['zero', '0'], ['s2', 's^2'], ['st', 's*t'], ['irr', 's^2 + s*t + t^2']];
 const RANGES = [
-  ['analytic_rank', 'Analytic rank'], ['n_singular', 'Singular fibres'], ['n_reducible', 'Reducible fibres'],
+  ['analytic_rank', 'Rank of \\(E(\\mathbf F_2(T))\\)'], ['n_singular', 'Singular fibres'], ['n_reducible', 'Reducible fibres'],
   ['n_places', 'Bad places'], ['L_degree', 'Degree of \\(L\\)'], ['rho_f2', '\\(\\rho(X_{\\mathbf F_2})\\)'],
   ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)'], ['height', 'Height (finite)'],
   ['br_disc', '\\(\\#\\mathrm{Br}\\cdot|\\mathrm{disc}\\,\\mathrm{NS}|\\)'],
@@ -188,7 +188,7 @@ const COLUMNS = [
   ['a1', '\\(a_1\\)', r => T(a1Tex(r.a1)), true],
   ['config', 'Singular fibres', r => T(configTex(r.config)), true],
   ['torsion', 'Torsion', r => T(torsionTex(r.torsion)), true],
-  ['analytic_rank', 'Rank', r => r.analytic_rank, true],
+  ['analytic_rank', 'Rank of \\(E(\\mathbf F_2(T))\\)', r => r.analytic_rank, true],
   ['rho_f2', '\\(\\rho(X_{\\mathbf F_2})\\)', r => r.rho_f2, true],
   ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r => r.rho_geom, true],
   ['height', 'Height', r => heightText(r.height), true],
@@ -482,20 +482,28 @@ function equationTex(key) {
   return `${left} = ${right}`;
 }
 
-function magmaSnippet(key) {
-  return `// From the root of the census repository
-load "elliptic_fibration_orbits_f2.m";
-load "functions_census.m";
-R<s,t> := PolynomialRing(GF(2), 2);
-K<T> := RationalFunctionField(GF(2));
-A := FibrationFromKeyF2(R, ${key});
-E := EllipticCurve([ K | Evaluate(f, [K!1, T]) : f in A ]);
-LocalInformation(E);
-LFunction(E);
-TorsionSubgroup(E);
-P2, Z := ZetaFunction(E);
-PicardNumber(E);
-CensusRow(${key}, A);`;
+function magmaSnippet(key, p2) {
+  // Magma code for a surface that uses only built-in functions, so nothing has to be loaded.
+  //   Input:  key, the surface's key; p2, the coefficients of its P2
+  //   Output: a string of Magma code
+  const d = decodeKey(key);
+  const form = (ms) => ms.length ? ms.map(([, e]) => e === 0 ? '1' : e === 1 ? 'T' : `T^${e}`).join(' + ') : '0';
+  const p2Text = polyTerms(p2).map(t => t.replace(/^([+-] )?(-?\d+)u/, '$1$2*u').replace(/\^\{(\d+)\}/, '^$1')).join(' ');
+  return `// Surface ${key}: built-in Magma functions only, nothing to load.
+K<T> := RationalFunctionField(GF(2));    // T = t/s
+E := EllipticCurve([ K | ${form(d.a1)}, 0, ${form(d.a3)}, ${form(d.a4)}, ${form(d.a6)} ]);
+
+LocalInformation(E);       // <place, ord(Delta_min), f, c, Kodaira type> at each bad place
+TorsionSubgroup(E);        // torsion of E(K)
+LFunction(E);              // L(E/K, u)
+AnalyticInformation(E);    // its first entry is the rank of E(K)
+
+// P2 as shown on this page
+Zu<u> := PolynomialRing(Integers());
+P2 := ${p2Text};
+Factorization(P2);         // its factors, irreducible over Z
+Slopes(NewtonPolygon(ChangeRing(P2, pAdicRing(2, 500))));    // the 2-adic slopes give the height
+ArtinTateFormula(Parent(P2) ! (u^22 * Evaluate(P2, 1/u)), 2, 1);    // rho(X/F_2) and #Br(X)*|disc NS(X)|`;
 }
 
 async function renderSurface(keyText) {
@@ -528,7 +536,7 @@ async function renderSurface(keyText) {
   const splitB = splitP2(fibrePoly);
   const p2Tex = String.raw`\begin{aligned} P_2(u) &= ${brokenLines(polyTerms(p2))} \\ &= ${brokenLines(factorPieces(split))} \\ &= (1-2u)^{2} \Bigl(\prod_{v} B_v(u)\Bigr) L(E/K,u) \end{aligned}`;
   const partsTex = String.raw`\begin{aligned} \prod_{v} B_v(u) &= ${brokenLines(factorPieces(splitB))} \\ L(E/K,u) &= ${brokenLines(factorPieces(splitL))} \end{aligned}`;
-  const code = magmaSnippet(r.key);
+  const code = magmaSnippet(r.key, p2);
   const fact = (label, value) => h('div', {}, h('dt', {}, labelNode(label)), h('dd', {}, value));
 
   view.replaceChildren(back,
@@ -541,7 +549,7 @@ async function renderSurface(keyText) {
     h('dl', { class: 'facts', id: 'invariants' },
       fact('\\(a_1\\) class', T(a1Tex(r.a1))),
       fact('Torsion of \\(E(\\mathbf F_2(T))\\)', T(torsionTex(r.torsion))),
-      fact('Analytic rank', r.analytic_rank),
+      fact('Rank of \\(E(\\mathbf F_2(T))\\)', r.analytic_rank),
       fact('\\(\\rho(X_{\\mathbf F_2})\\)', r.rho_f2),
       fact('\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r.rho_geom),
       fact('Height', heightText(r.height)),
@@ -587,7 +595,7 @@ async function renderSurface(keyText) {
         catch { e.target.textContent = 'Select the text to copy'; }
       } }, 'Copy'),
       h('pre', { id: 'magma' }, code)),
-    h('p', { class: 'hint' }, 'Clone the ', h('a', { href: REPO }, 'census repository'), ' first. Magma itself is required.'));
+    h('p', { class: 'hint' }, 'Paste this into Magma; it uses only built-in functions. The census code computes P2 from the L-function and the fibres, in functions_census.m in the ', h('a', { href: REPO }, 'census repository'), '.'));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -663,7 +671,7 @@ async function renderStats() {
 
     h('h2', {}, 'Mordell–Weil and L-function'),
     h('div', { class: 'charts' },
-      card('Analytic rank', 'Order of vanishing of \\(L(E,s)\\) at \\(s=1\\).', barChart(s.rank, { xTitle: 'analytic rank' })),
+      card('Rank of \\(E(\\mathbf F_2(T))\\)', 'Computed as the order of vanishing of \\(L(E,s)\\) at \\(s=1\\), which equals the rank for these surfaces.', barChart(s.rank, { xTitle: 'rank' })),
       card('Torsion of \\(E(\\mathbf F_2(T))\\)', 'Subgroup of the Mordell–Weil group.', barChart([...s.torsion].sort((a, b) => byTorsionOrder(a[0], b[0])), { xTitle: 'torsion group' })),
       card('Degree of \\(L\\)', 'Equal to 20 minus the rank of the root lattices of the fibres.', barChart(s.L_degree, { xTitle: 'degree' })),
       card('Sign of \\(L\\)', 'In \\(L(E,u) = \\varepsilon\\,(2u)^n L(E,1/(4u))\\).', barChart(s.L_sign.map(([x, v]) => [Number(x) > 0 ? '+1' : '−1', v]), { xTitle: 'sign' })),

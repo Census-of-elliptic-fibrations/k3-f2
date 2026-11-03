@@ -3,7 +3,7 @@
 // in the browser, which is only loaded when first needed.
 
 import { decodeKey, parseFibres, componentCycles, normaliseConfiguration, typeOrder,
-         fibreFactors, p2FromData, splitP2, rowFromCsv } from './census_math.mjs';
+         fibreFactors, polyMul, p2FromData, splitP2, rowFromCsv } from './census_math.mjs';
 
 const REPO = 'https://github.com/Census-of-elliptic-fibrations/Census-of-elliptic-and-quasi-elliptic-K3-surfaces-over-F2';
 const DUCKDB = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm';
@@ -48,6 +48,11 @@ const configTex = (c) => c.split(', ').map(p => {
   return m ? `${m[1]}\\,${typeTex(m[2])}` : typeTex(p);
 }).join(',\\ ');
 const torsionTex = (g) => g === 'trivial' ? '0' : g.replace(/Z\//g, '\\mathbf{Z}/').replace(/ x /g, ' \\times ');
+function torsionOrder(g) {
+  // The order of a torsion group.  Input: a label such as "trivial" or "Z/2 x Z/4".  Output: an integer.
+  return g === 'trivial' ? 1 : g.split(' x ').reduce((n, part) => n * Number(part.slice(2)), 1);
+}
+const byTorsionOrder = (a, b) => torsionOrder(a) - torsionOrder(b) || a.localeCompare(b);
 function polyTex(c, v = 'u') {
   let out = '';
   c.forEach((a, i) => {
@@ -57,6 +62,47 @@ function polyTex(c, v = 'u') {
     out += out ? (a < 0 ? ' - ' : ' + ') + body : (a < 0 ? '-' : '') + body;
   });
   return out || '0';
+}
+function polyTerms(c, v = 'u') {
+  // The terms of a polynomial, each with its sign.
+  //   Input:  c, a coefficient list, constant term first
+  //   Output: a list of LaTeX strings, such as ['1', '- 22u', '+ 220u^{2}']
+  const out = [];
+  c.forEach((a, i) => {
+    if (!a) return;
+    const abs = Math.abs(a), mon = i === 0 ? '' : i === 1 ? v : `${v}^{${i}}`;
+    const body = mon && abs === 1 ? mon : `${abs}${mon}`;
+    out.push(out.length ? (a < 0 ? '- ' : '+ ') + body : (a < 0 ? '-' : '') + body);
+  });
+  return out.length ? out : ['0'];
+}
+function factorPieces({ algebraic, rest }) {
+  // A factored polynomial as pieces that can be broken across lines.
+  //   Input:  the result of splitP2
+  //   Output: a list of LaTeX strings; ['1'] when there are no factors
+  const pieces = [];
+  const add = (poly, mult) => {
+    const t = polyTerms(poly);
+    t[0] = '(' + t[0];
+    t[t.length - 1] += ')' + (mult > 1 ? `^{${mult}}` : '');
+    pieces.push(...t);
+  };
+  algebraic.forEach(a => add(a.poly, a.mult));
+  if (rest.length > 1) add(rest, 1);
+  return pieces.length ? pieces : ['1'];
+}
+function brokenLines(pieces, width = 90) {
+  // Joins pieces into lines of an aligned display.
+  //   Input:  pieces, LaTeX strings; width, the longest line in characters of LaTeX
+  //   Output: a LaTeX string, with each later line indented under the first
+  const lines = [];
+  let line = '';
+  for (const p of pieces) {
+    if (line && line.length + p.length + 1 > width) { lines.push(line); line = p; }
+    else line = line ? line + ' ' + p : p;
+  }
+  lines.push(line);
+  return lines.join(String.raw`\\ &\quad `);
 }
 const heightText = (x) => x === null || x === undefined ? '∞' : String(x);
 
@@ -289,7 +335,7 @@ async function renderSearch(p) {
   view.replaceChildren(
     h('h1', {}, 'Search the census'),
     h('div', { class: 'search-layout' },
-      h('details', { class: 'filters', ...(wide || p.toString() ? { open: true } : {}) }, h('summary', {}, 'Filters'), filterForm(p, types, m.torsionGroups)),
+      h('details', { class: 'filters', ...(wide || p.toString() ? { open: true } : {}) }, h('summary', {}, 'Filters'), filterForm(p, types, [...m.torsionGroups].sort(byTorsionOrder))),
       results));
   runSearch(p, results, m);
 }
@@ -472,17 +518,16 @@ async function renderSurface(keyText) {
     return;
   }
   const p2 = p2FromData(r.L, r.records);
-  const { algebraic, rest } = splitP2(p2);
-  const factorTex = [
-    ...algebraic.map(a => {
-      const body = a.n === 1 ? polyTex(a.poly) : polyTex(a.poly);
-      return `(${body})${a.mult > 1 ? `^{${a.mult}}` : ''}`;
-    }),
-    rest.length > 1 ? `(${polyTex(rest)})` : '',
-  ].join('\\,');
-  const exps = new Map();
-  fibreFactors(r.records).forEach(e => exps.set(e, (exps.get(e) || 0) + 1));
-  const fibreFactorTex = [...exps].map(([e, n]) => `(1 - ${e === 1 ? '2u' : `(2u)^{${e}}`})${n > 1 ? `^{${n}}` : ''}`).join('\\,');
+  const split = splitP2(p2);
+  const splitL = splitP2(r.L);
+  let fibrePoly = [1];
+  for (const e of fibreFactors(r.records)) {
+    const g = new Array(e + 1).fill(0); g[0] = 1; g[e] = -(2 ** e);
+    fibrePoly = polyMul(fibrePoly, g);
+  }
+  const splitB = splitP2(fibrePoly);
+  const p2Tex = String.raw`\begin{aligned} P_2(u) &= ${brokenLines(polyTerms(p2))} \\ &= ${brokenLines(factorPieces(split))} \\ &= (1-2u)^{2} \Bigl(\prod_{v} B_v(u)\Bigr) L(E/K,u) \end{aligned}`;
+  const partsTex = String.raw`\begin{aligned} \prod_{v} B_v(u) &= ${brokenLines(factorPieces(splitB))} \\ L(E/K,u) &= ${brokenLines(factorPieces(splitL))} \end{aligned}`;
   const code = magmaSnippet(r.key);
   const fact = (label, value) => h('div', {}, h('dt', {}, labelNode(label)), h('dd', {}, value));
 
@@ -516,18 +561,18 @@ async function renderSurface(keyText) {
     h('p', { class: 'hint' }, labelNode('\\(f_P\\) is the conductor exponent and \\(c_P\\) the Tamagawa number. The last column lists the sizes of the Frobenius orbits on the components that do not meet the zero section, as computed by ComponentCycles.')),
 
     h('h2', {}, 'L-function'),
-    h('div', { class: 'wrapping', id: 'l-function' }, T(`L(E,u) = ${polyTex(r.L)}`)),
-    h('p', { class: 'hint' }, labelNode(`Here \\(u = 2^{-s}\\); the degree is ${r.L_degree}.`)),
+    h('div', { class: 'wrapping', id: 'l-function' }, T(`L(E/K,u) = ${polyTex(r.L)}`)),
+    h('p', { class: 'hint' }, labelNode(`Here \\(K = \\mathbf F_2(T)\\) and \\(u = 2^{-s}\\); the degree is ${r.L_degree}.`)),
 
     h('h2', {}, 'Zeta function'),
     h('div', { class: 'formula' }, T('Z(X,u) = \\frac{1}{(1-u)\\,P_2(u)\\,(1-4u)}', true)),
-    h('div', { class: 'wrapping', id: 'p2' }, T(`P_2(u) = ${polyTex(p2)}`)),
-    h('h3', {}, 'From the fibres'),
-    h('div', { class: 'wrapping', id: 'p2-fibres' }, T(`P_2(u) = (1-2u)^{2}${fibreFactorTex ? '\\,' + fibreFactorTex : ''}\\,L(E,u)`)),
-    h('h3', {}, 'Factored by inverse roots'),
-    h('div', { class: 'wrapping', id: 'p2-factors' }, T(`P_2(u) = ${factorTex}`)),
-    h('p', { class: 'hint' }, rest.length > 1
-      ? labelNode(`The parenthesised factors with inverse roots \\(2\\zeta\\), \\(\\zeta\\) a root of unity, come first; their degrees add up to \\(\\rho(X_{\\overline{\\mathbf F}_2})\\). The last factor has degree ${rest.length - 1}, has no such inverse roots, and is not necessarily irreducible.`)
+    h('div', { class: 'formula', id: 'p2' }, T(p2Tex, true)),
+    h('p', { class: 'hint' }, labelNode('The factor \\((1-2u)^2\\) comes from the zero section and a fibre.')),
+    h('h3', {}, 'The contributions'),
+    h('div', { class: 'formula', id: 'p2-parts' }, T(partsTex, true)),
+    h('p', { class: 'hint' }, labelNode('Here \\(v\\) runs over the singular fibres, and \\(B_v(u) = \\det\\bigl(1 - (2u)^{\\deg v}\\,\\mathrm{Frob}_v\\bigr)\\) on the components of the fibre that do not meet the zero section.')),
+    h('p', { class: 'hint' }, split.rest.length > 1
+      ? labelNode(`Factors whose inverse roots have the form \\(2\\zeta\\), \\(\\zeta\\) a root of unity, come first; in \\(P_2\\) their degrees add up to \\(\\rho(X_{\\overline{\\mathbf F}_2})\\). The last factor, of degree ${split.rest.length - 1}, has no such inverse roots and is not necessarily irreducible.`)
       : labelNode('All inverse roots have the form \\(2\\zeta\\), \\(\\zeta\\) a root of unity, so the surface is supersingular.')),
 
     h('h2', {}, 'Points'),
@@ -619,7 +664,7 @@ async function renderStats() {
     h('h2', {}, 'Mordell–Weil and L-function'),
     h('div', { class: 'charts' },
       card('Analytic rank', 'Order of vanishing of \\(L(E,s)\\) at \\(s=1\\).', barChart(s.rank, { xTitle: 'analytic rank' })),
-      card('Torsion of \\(E(\\mathbf F_2(T))\\)', 'Subgroup of the Mordell–Weil group.', barChart(s.torsion, { xTitle: 'torsion group' })),
+      card('Torsion of \\(E(\\mathbf F_2(T))\\)', 'Subgroup of the Mordell–Weil group.', barChart([...s.torsion].sort((a, b) => byTorsionOrder(a[0], b[0])), { xTitle: 'torsion group' })),
       card('Degree of \\(L\\)', 'Equal to 20 minus the rank of the root lattices of the fibres.', barChart(s.L_degree, { xTitle: 'degree' })),
       card('Sign of \\(L\\)', 'In \\(L(E,u) = \\varepsilon\\,(2u)^n L(E,1/(4u))\\).', barChart(s.L_sign.map(([x, v]) => [Number(x) > 0 ? '+1' : '−1', v]), { xTitle: 'sign' })),
       card('Sign of \\(P_2\\)', 'In \\(P_2(u) = \\varepsilon_Z\\,(2u)^{22} P_2(1/(4u))\\).', barChart(s.zeta_sign.map(([x, v]) => [Number(x) > 0 ? '+1' : '−1', v]), { xTitle: 'sign' }))),

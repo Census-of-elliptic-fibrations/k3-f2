@@ -4,6 +4,7 @@
 
 import { decodeKey, parseFibres, componentCycles, normaliseConfiguration, typeOrder,
          fibreFactors, polyMul, p2FromData, splitP2, rowFromCsv } from './census_math.mjs';
+import { highlightMagma } from './magma-highlight.mjs';
 
 const REPO = 'https://github.com/Census-of-elliptic-fibrations/Census-of-elliptic-and-quasi-elliptic-K3-surfaces-over-F2';
 const DUCKDB = 'https://cdn.jsdelivr.net/npm/@duckdb/duckdb-wasm@1.32.0/+esm';
@@ -538,6 +539,7 @@ async function renderSurface(keyText) {
   const p2Tex = String.raw`\begin{aligned} P_2(u) &= ${brokenLines(polyTerms(p2))} \\ &= ${brokenLines(factorPieces(split))} \\ &= (1-2u)^{2} \Bigl(\prod_{v} B_v(u)\Bigr) L(E/K,u) \end{aligned}`;
   const partsTex = String.raw`\begin{aligned} \prod_{v} B_v(u) &= ${brokenLines(factorPieces(splitB))} \\ L(E/K,u) &= ${brokenLines(factorPieces(splitL))} \end{aligned}`;
   const code = magmaSnippet(r.key, p2);
+  const codeElement = h('code', { class: 'language-magma' }, code);
   const fact = (label, value) => h('div', {}, h('dt', {}, labelNode(label)), h('dd', {}, value));
 
   view.replaceChildren(back,
@@ -596,8 +598,9 @@ async function renderSurface(keyText) {
         try { await navigator.clipboard.writeText(code); e.target.textContent = 'Copied'; }
         catch { e.target.textContent = 'Select the text to copy'; }
       } }, 'Copy'),
-      h('pre', { id: 'magma' }, code)),
+      h('pre', { id: 'magma' }, codeElement)),
     h('p', { class: 'hint' }, 'Paste this into Magma; it uses only built-in functions. The census code computes P2 from the L-function and the fibres, in functions_census.m in the ', h('a', { href: REPO }, 'census repository'), '.'));
+  void highlightMagma(codeElement);
 }
 
 // ---------------------------------------------------------------------------------------

@@ -30,3 +30,4 @@ The build stops if a row fails its checks.
 - `data/surfaces.parquet`, `data/fibres.parquet`: what the search reads.
 - `data/rows/`: 1000 surfaces per file, with the L-function, for browsing and surface pages.
 - `vendor/katex/`: KaTeX 0.16.11, for the mathematics.
+- `js/magma-highlight.mjs`, `vendor/tree-sitter/`: Magma syntax highlighting, loaded on surface pages. Parser versions and rebuild instructions are in `vendor/tree-sitter/README.md`.

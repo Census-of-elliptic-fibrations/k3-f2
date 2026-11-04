@@ -8,7 +8,8 @@ import path from 'node:path';
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
 const port = Number(process.argv[2]) || 8080;
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css',
-                '.json': 'application/json', '.csv': 'text/csv', '.txt': 'text/plain', '.woff2': 'font/woff2' };
+                '.json': 'application/json', '.csv': 'text/csv', '.txt': 'text/plain', '.woff2': 'font/woff2',
+                '.wasm': 'application/wasm', '.scm': 'text/plain; charset=utf-8' };
 
 http.createServer((req, res) => {
   const url = decodeURIComponent(req.url.split('?')[0]);

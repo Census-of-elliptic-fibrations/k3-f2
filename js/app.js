@@ -203,6 +203,7 @@ function cyclotomicConditions(p) {
   const out = [];
   const exact = p.get('cyc_exact') ? parseCyclotomic(p.get('cyc_exact')) : null;
   if (exact) out.push(`cyc = '${exact}'`);
+  else if (p.get('cyc_exact')) out.push('FALSE');
   const trc = p.get('trc') ? parseTranscendental(p.get('trc')) : null;
   if (trc) out.push(`zid IN (SELECT zid FROM zeta WHERE trc = '${trc}')`);
   else if (p.get('trc')) out.push('FALSE');
@@ -236,7 +237,9 @@ function cyclotomicFieldset(p, orders) {
     host,
     h('div', { class: 'actions', style: 'margin-top:4px' }, h('button', { type: 'button', class: 'add-cyc', onclick: () => addRow() }, 'Add a cyclotomic condition')),
     h('label', { style: 'display:grid;gap:2px;font-size:.92rem;margin-top:8px' }, 'Exact cyclotomic part',
-      h('input', { type: 'text', name: 'cyc_exact', class: 'f-cyc-exact', placeholder: 'e.g. 1^4 3^2 6', value: p.get('cyc_exact') || '' })));
+      h('input', { type: 'text', name: 'cyc_exact', class: 'f-cyc-exact', placeholder: 'e.g. 1^4 3^2 6', value: p.get('cyc_exact') || '' })),
+    p.get('cyc_exact') && !parseCyclotomic(p.get('cyc_exact'))
+      ? h('p', { class: 'error' }, 'This is not a cyclotomic part, so nothing matches.') : '');
 }
 
 function transcendentalFieldset(p) {

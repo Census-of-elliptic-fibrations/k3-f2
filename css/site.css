@@ -47,6 +47,19 @@ input[type="number"], input[type="text"], select { background: var(--bg); border
 .checks label { display: flex; gap: 6px; align-items: baseline; }
 .fibre-row { display: grid; grid-template-columns: 1.3fr repeat(4, 1fr) auto; gap: 4px; margin-bottom: 4px; font-size: .9rem; align-items: end; }
 .fibre-row label { display: grid; font-size: .75rem; color: var(--muted); min-width: 0; }
+.cyc-row { display: grid; grid-template-columns: 1.4fr 1fr 1fr auto; gap: 4px; margin-bottom: 4px; font-size: .9rem; align-items: end; }
+.cyc-row label { display: grid; font-size: .75rem; color: var(--muted); min-width: 0; }
+.data td.poly-cell { white-space: normal; min-width: 320px; max-width: 640px; line-height: 1.9; }
+.phi-list { margin: 8px 0; font-size: .9rem; }
+.phi-list summary { cursor: pointer; color: var(--muted); }
+.pie-box { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; }
+.chart svg.pie { width: 160px; height: 160px; flex: none; }
+.pie path:focus-visible { outline: none; stroke: var(--ink); }
+.pie-legend { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; font-size: .9rem; }
+.pie-legend li { display: grid; grid-template-columns: 10px auto auto auto; gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+.pie-legend i { width: 10px; height: 10px; display: inline-block; }
+.pie-value { text-align: right; }
+.pie-share { color: var(--muted); text-align: right; }
 .hint { font-size: .82rem; color: var(--muted); margin: 4px 0; }
 button { background: var(--panel); border: 1px solid var(--line); padding: 3px 10px; cursor: pointer; border-radius: 2px; }
 button:hover { border-color: var(--accent); }

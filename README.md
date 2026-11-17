@@ -1,6 +1,6 @@
 # Census website
 
-The website of the [census of elliptic and quasielliptic K3 surfaces over F2](https://github.com/Census-of-elliptic-fibrations/Census-of-elliptic-and-quasi-elliptic-K3-surfaces-over-F2). This is a preview: the data is incomplete, so please do not cite it yet.
+The website of the [census of elliptic and quasielliptic K3 surfaces over F2](https://github.com/Census-of-elliptic-fibrations/Census-of-elliptic-and-quasi-elliptic-K3-surfaces-over-F2). This is a preview, so please do not cite it yet.
 
 It is a static site. Searches run in the visitor's browser with [DuckDB-WASM](https://github.com/duckdb/duckdb-wasm), reading the Parquet files in `data/`.
 
@@ -28,6 +28,8 @@ The build stops if a row fails its checks.
 - `index.html`, `css/site.css`, `js/app.js`: the site.
 - `js/census_math.mjs`: keys, fibres and the factors of P2; a copy from the census repository.
 - `data/surfaces.parquet`, `data/fibres.parquet`: what the search reads.
+- `data/zeta.parquet`: one row per zeta function that occurs, with its LMFDB label; what the zeta functions tab reads.
+- `data/cyclotomic.parquet`: one row per cyclotomic factor of each zeta function, for the cyclotomic filters.
 - `data/rows/`: 1000 surfaces per file, with the L-function, for browsing and surface pages.
 - `vendor/katex/`: KaTeX 0.16.11, for the mathematics.
 - `js/magma-highlight.mjs`, `vendor/tree-sitter/`: Magma syntax highlighting, loaded on surface pages. Parser versions and rebuild instructions are in `vendor/tree-sitter/README.md`.

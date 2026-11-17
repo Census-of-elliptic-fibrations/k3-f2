@@ -3,7 +3,8 @@
 // in the browser, which is only loaded when first needed.
 
 import { decodeKey, parseFibres, componentCycles, normaliseConfiguration, typeOrder,
-         fibreFactors, polyMul, p2FromData, splitP2, rowFromCsv } from './census_math.mjs';
+         fibreFactors, polyMul, p2FromData, splitP2, rowFromCsv, zetaLabel, lmfdbPoly,
+         cyclotomicPart, parseCyclotomic, cyclotomicCoefficients, transcendentalPoly, parseTranscendental, transcendentalId, cyclotomicDegree } from './census_math.mjs';
 import { highlightMagma } from './magma-highlight.mjs';
 
 const REPO = 'https://github.com/Census-of-elliptic-fibrations/Census-of-elliptic-and-quasi-elliptic-K3-surfaces-over-F2';
@@ -77,21 +78,32 @@ function polyTerms(c, v = 'u') {
   });
   return out.length ? out : ['0'];
 }
-function factorPieces({ algebraic, rest }) {
-  // A factored polynomial as pieces that can be broken across lines.
-  //   Input:  the result of splitP2
+const phiTex = (n, e, x = '2u') => `\\Phi_{${n}}(${x})${e > 1 ? `^{${e}}` : ''}`;
+function factorPieces({ algebraic, rest }, x = '2u', v = 'u') {
+  // A factored polynomial as pieces that can be broken across lines: the cyclotomic factors as
+  // Phi_n(x)^e, then the remaining factor written out.
+  //   Input:  the result of splitP2; x, the argument of the Phi_n; v, the variable of the rest
   //   Output: a list of LaTeX strings; ['1'] when there are no factors
-  const pieces = [];
-  const add = (poly, mult) => {
-    const t = polyTerms(poly);
-    t[0] = '(' + t[0];
-    t[t.length - 1] += ')' + (mult > 1 ? `^{${mult}}` : '');
+  const pieces = algebraic.map(a => phiTex(a.n, a.mult, x));
+  if (rest.length > 1) {
+    const t = polyTerms(rest, v);
+    t[0] = (pieces.length ? '\\cdot (' : '(') + t[0];
+    t[t.length - 1] += ')';
     pieces.push(...t);
-  };
-  algebraic.forEach(a => add(a.poly, a.mult));
-  if (rest.length > 1) add(rest, 1);
+  }
   return pieces.length ? pieces : ['1'];
 }
+const trcTex = (id) => polyTex(transcendentalPoly(id) || [2], 'T');
+const trcLink = (id, base = '#/zeta') => h('a', { href: `${base}?trc=${encodeURIComponent(id)}` }, id);
+const cycTex = (text) => text ? text.split(' ').map(f => { const [n, e] = f.split('^'); return phiTex(n, Number(e || 1), '').replace('()', ''); }).join('') : '1';
+function phiList(ns, x = 'x') {
+  // A <details> listing the cyclotomic polynomials Phi_n for the given n.
+  const sorted = [...new Set(ns)].sort((a, b) => a - b);
+  return h('details', { class: 'phi-list' }, h('summary', {}, 'The cyclotomic polynomials used here'),
+    h('div', { class: 'formula' }, T(String.raw`\begin{aligned} ${sorted.map(n => `\\Phi_{${n}}(${x}) &= ${polyTex(cyclotomicCoefficients(n), x)}`).join(' \\\\ ')} \end{aligned}`, true)));
+}
+const phiHint = () => h('p', { class: 'hint' }, labelNode('Here \\(\\Phi_n\\) is the \\(n\\)-th cyclotomic polynomial, normalised to have constant term 1, so \\(\\Phi_1(x) = 1 - x\\). The inverse roots of \\(\\Phi_n(2u)\\) are \\(2\\zeta\\) with \\(\\zeta\\) a primitive \\(n\\)-th root of unity.'));
+const nsHint = () => h('p', { class: 'hint' }, labelNode('\\(d_{\\mathrm{NS}}\\) is the degree of the smallest extension \\(\\mathbf F_{2^d}\\) over which \\(\\mathrm{NS}(X_{\\overline{\\mathbf F}_2})\\) is defined: the order of Frobenius on it, the least common multiple of the \\(n\\) with \\(\\Phi_n\\) in the cyclotomic part.'));
 function brokenLines(pieces, width = 90) {
   // Joins pieces into lines of an aligned display.
   //   Input:  pieces, LaTeX strings; width, the longest line in characters of LaTeX
@@ -130,7 +142,11 @@ function loadShard(i) {
   // The surfaces of one row file.  Input: its number.  Output: a promise of row objects.
   if (!shardCache.has(i)) {
     shardCache.set(i, fetchText(`data/rows/${String(i).padStart(5, '0')}.csv`).then(text =>
-      text.trim().split('\n').map(line => rowFromCsv(line.split(',')))));
+      text.trim().split('\n').map(line => {
+        const r = rowFromCsv(line.split(','));
+        const cyc = cyclotomicPart(p2FromData(r.L, r.records));
+        return Object.assign(r, { cyc: cyc.text, ns_degree: cyc.nsDegree });
+      })));
   }
   return shardCache.get(i);
 }
@@ -164,11 +180,84 @@ function engine() {
     };
     await attach('surfaces');
     conn.useFibres = () => fibresReady ||= attach('fibres');
+    conn.useZeta = () => zetaReady ||= attach('zeta');
+    conn.useCyclotomic = () => cyclotomicReady ||= attach('cyclotomic');
     window.__censusEngineReady = true;
     return conn;
   })();
 }
 let fibresReady = null;       // the fibre file is only downloaded when a fibre filter is used
+let zetaReady = null;         // and the zeta functions when they are first asked for
+let cyclotomicReady = null;   // and the cyclotomic factors when a cyclotomic filter is used
+async function attachFor(conn, where) {
+  // Loads the extra files that a search condition reads.  Input: a connection, a SQL condition.
+  if (where.includes('FROM fibres')) await conn.useFibres();
+  if (where.includes('FROM zeta')) await conn.useZeta();
+  if (where.includes('FROM cyclotomic')) await conn.useCyclotomic();
+}
+
+function cyclotomicConditions(p) {
+  // SQL conditions for the cyclotomic part, on a table with columns zid and cyc.
+  //   Input:  URLSearchParams with cyc_exact (a cyclotomic part) and cyc rows "n|min|max"
+  //   Output: a list of SQL strings
+  const out = [];
+  const exact = p.get('cyc_exact') ? parseCyclotomic(p.get('cyc_exact')) : null;
+  if (exact) out.push(`cyc = '${exact}'`);
+  const trc = p.get('trc') ? parseTranscendental(p.get('trc')) : null;
+  if (trc) out.push(`zid IN (SELECT zid FROM zeta WHERE trc = '${trc}')`);
+  else if (p.get('trc')) out.push('FALSE');
+  for (const raw of p.getAll('cyc')) {
+    const [nText, minText, maxText] = raw.split('|');
+    const n = parseInt(nText, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 66) continue;
+    const lo = Math.max(parseInt(minText, 10) || 0, 0), hi = parseInt(maxText, 10);
+    if (lo > 0) out.push(`zid IN (SELECT zid FROM cyclotomic WHERE n = ${n} AND e >= ${lo}${Number.isFinite(hi) ? ` AND e <= ${hi}` : ''})`);
+    else if (Number.isFinite(hi)) out.push(`zid NOT IN (SELECT zid FROM cyclotomic WHERE n = ${n} AND e > ${Math.max(hi, 0)})`);
+  }
+  return out;
+}
+
+function cyclotomicFieldset(p, orders) {
+  // The form controls for the cyclotomic part.  Input: URLSearchParams; the n that occur.
+  const host = h('div', { class: 'cyc-rows' });
+  const addRow = (raw = '||') => {
+    const [n, lo, hi] = raw.split('|');
+    const row = h('div', { class: 'cyc-row' },
+      h('label', {}, labelNode('\\(\\Phi_n\\), \\(n =\\)'), h('select', { name: 'cyc_n' }, h('option', { value: '' }, 'Any'),
+        orders.map(m => h('option', { value: String(m), ...(String(m) === n ? { selected: true } : {}) }, String(m))))),
+      h('label', {}, 'exponent from', h('input', { type: 'number', min: 0, name: 'cyc_min', value: lo })),
+      h('label', {}, 'to', h('input', { type: 'number', min: 0, name: 'cyc_max', value: hi })),
+      h('button', { type: 'button', 'aria-label': 'Remove this condition', onclick: () => row.remove() }, '×'));
+    host.append(row);
+  };
+  p.getAll('cyc').forEach(addRow);
+  return h('fieldset', {}, h('legend', {}, labelNode('Cyclotomic part of \\(P_2\\)')),
+    h('p', { class: 'hint' }, labelNode('Each row asks for \\(\\Phi_n(2u)\\) to divide \\(P_2\\) with an exponent in the range; “to 0” asks for it not to divide.')),
+    host,
+    h('div', { class: 'actions', style: 'margin-top:4px' }, h('button', { type: 'button', class: 'add-cyc', onclick: () => addRow() }, 'Add a cyclotomic condition')),
+    h('label', { style: 'display:grid;gap:2px;font-size:.92rem;margin-top:8px' }, 'Exact cyclotomic part',
+      h('input', { type: 'text', name: 'cyc_exact', class: 'f-cyc-exact', placeholder: 'e.g. 1^4 3^2 6', value: p.get('cyc_exact') || '' })));
+}
+
+function transcendentalFieldset(p) {
+  // The form control for the transcendental part.  Input: URLSearchParams.
+  const bad = p.get('trc') && !parseTranscendental(p.get('trc'));
+  return h('fieldset', {}, h('legend', {}, labelNode('Transcendental part of \\(P_2\\)')),
+    h('input', { type: 'text', name: 'trc', class: 'f-trc', 'aria-label': 'Transcendental part', placeholder: 'e.g. 20.nlnonmnonm or 2.2.a.nlnonmnonm', value: p.get('trc') || '' }),
+    bad ? h('p', { class: 'error' }, 'This is not a transcendental part, so nothing matches.') : '',
+    h('p', { class: 'hint' }, labelNode('Its name \\(d\\).code (degree, then the last part of an LMFDB label), an LMFDB label, or its coefficients, constant term first, of \\(Q(u)\\) or of \\(2Q(T/2)\\).')));
+}
+
+function readCyclotomic(f, q) {
+  // Copies the cyclotomic and transcendental controls of a form into URLSearchParams.
+  const exact = (f.get('cyc_exact') || '').trim();
+  if (exact) q.set('cyc_exact', exact);
+  const trc = (f.get('trc') || '').trim();
+  if (trc) q.set('trc', trc);
+  const [ns, los, his] = ['cyc_n', 'cyc_min', 'cyc_max'].map(n => f.getAll(n));
+  ns.forEach((n, i) => { if (n && (los[i] !== '' || his[i] !== '')) q.append('cyc', [n, los[i], his[i]].join('|')); });
+}
+const ZETA_LABEL = /^2\.\d+\.[a-z]+(\.[a-z]+)?$/;
 const sqlRows = async (conn, sql) => (await conn.query(sql)).toArray().map(r => r.toJSON());
 
 // ---------------------------------------------------------------------------------------
@@ -180,12 +269,13 @@ const RANGES = [
   ['analytic_rank', 'Rank of \\(E(\\mathbf F_2(T))\\)'], ['rank_geom', 'Rank of \\(E(\\overline{\\mathbf F}_2(T))\\)'], ['n_singular', 'Singular fibres'], ['n_reducible', 'Reducible fibres'],
   ['n_places', 'Bad places'], ['L_degree', 'Degree of \\(L\\)'], ['rho_f2', '\\(\\rho(X_{\\mathbf F_2})\\)'],
   ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)'], ['height', 'Height (finite)'],
-  ['br_disc', '\\(\\#\\mathrm{Br}\\cdot|\\mathrm{disc}\\,\\mathrm{NS}|\\)'],
+  ['br_disc', '\\(\\#\\mathrm{Br}\\cdot|\\mathrm{disc}\\,\\mathrm{NS}|\\)'], ['ns_degree', '\\(d_{\\mathrm{NS}}\\)'],
   ['pts_f2', '\\(\\#X(\\mathbf F_2)\\)'], ['pts_f4', '\\(\\#X(\\mathbf F_4)\\)'], ['pts_f8', '\\(\\#X(\\mathbf F_8)\\)'],
   ['pts_f16', '\\(\\#X(\\mathbf F_{16})\\)'], ['pts_f32', '\\(\\#X(\\mathbf F_{32})\\)'],
 ];
 const COLUMNS = [
   ['key', 'Key', r => h('a', { href: `#/surface/${r.key}` }, String(r.key)), true],
+  ['equation', 'Equation', r => T(equationTex(r.key)), false, false],
   ['a1', '\\(a_1\\)', r => T(a1Tex(r.a1)), true],
   ['config', 'Singular fibres', r => T(configTex(r.config)), true],
   ['torsion', 'Torsion', r => T(torsionTex(r.torsion)), true],
@@ -195,6 +285,8 @@ const COLUMNS = [
   ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r => r.rho_geom, true],
   ['height', 'Height', r => heightText(r.height), true],
   ['br_disc', '\\(\\#\\mathrm{Br}\\cdot|\\mathrm{disc}\\,\\mathrm{NS}|\\)', r => fmt(r.br_disc), true],
+  ['cyc', 'Cyclotomic part', r => T(cycTex(r.cyc)), false, false],
+  ['ns_degree', '\\(d_{\\mathrm{NS}}\\)', r => r.ns_degree, false],
   ['n_singular', 'Singular', r => r.n_singular, false],
   ['n_reducible', 'Reducible', r => r.n_reducible, false],
   ['n_places', 'Bad places', r => r.n_places, false],
@@ -207,7 +299,8 @@ const COLUMNS = [
   ['pts_f16', '\\(\\#X(\\mathbf F_{16})\\)', r => fmt(r.pts_f16), false],
   ['pts_f32', '\\(\\#X(\\mathbf F_{32})\\)', r => fmt(r.pts_f32), false],
 ];
-const LEFT = new Set(['key', 'a1', 'config', 'torsion']);
+const LEFT = new Set(['key', 'equation', 'a1', 'config', 'torsion', 'cyc']);
+const sortable = (id) => COLUMNS.some(c => c[0] === id && c[4] !== false);
 const defaultCols = COLUMNS.filter(c => c[3]).map(c => c[0]);
 
 function labelNode(text) {
@@ -221,6 +314,9 @@ function buildWhere(p) {
   // The SQL condition of a search.  Every value is checked or converted first, because searches
   // come from links.  Input: URLSearchParams.  Output: a SQL string, or '' when unfiltered.
   const out = [];
+  const keys = (p.get('keys') || '').match(/\d+/g);
+  if (keys) out.push(`key IN (${[...new Set(keys.slice(0, 1000).map(Number).filter(k => k < 2 ** 32))].join(',') || -1})`);
+  out.push(...cyclotomicConditions(p));
   const a1 = (p.get('a1') || '').split(',').map(x => A1.find(a => a[0] === x)).filter(Boolean);
   if (a1.length && a1.length < A1.length) out.push(`a1 IN (${a1.map(a => `'${a[1]}'`).join(',')})`);
   for (const [col] of RANGES) {
@@ -237,6 +333,8 @@ function buildWhere(p) {
   if (p.get('ord') === '0') out.push('(height IS NULL OR height > 1)');
   const config = p.get('config') && normaliseConfiguration(p.get('config'));
   if (config) out.push(`config = '${config}'`);
+  const zeta = (p.get('zeta') || '').trim();
+  if (ZETA_LABEL.test(zeta)) out.push(`zid IN (SELECT zid FROM zeta WHERE label = '${zeta}')`);
   const agg = p.get('count') === 'places' ? 'COUNT(*)' : 'SUM(deg)';
   for (const raw of p.getAll('fib')) {
     const [type, deg, f, c, min] = raw.split('|');
@@ -260,8 +358,12 @@ const goSearch = (p) => { location.hash = '#/search?' + p.toString(); };
 
 let searchToken = 0;
 
-function filterForm(p, types, torsions) {
+function filterForm(p, types, torsions, orders) {
   const form = h('form', { id: 'filters-form', onsubmit: (e) => { e.preventDefault(); goSearch(readForm(form, p)); } });
+
+  form.append(h('fieldset', {}, h('legend', {}, 'Key'),
+    h('input', { type: 'text', name: 'keys', id: 'f-keys', 'aria-label': 'Keys', placeholder: 'e.g. 4194432, 4475010', value: p.get('keys') || '' }),
+    h('p', { class: 'hint' }, 'One or more census keys, separated by commas or spaces.')));
 
   form.append(h('fieldset', {}, h('legend', {}, labelNode('\\(a_1\\) class')),
     h('div', { class: 'checks' }, A1.map(([id, form_]) => {
@@ -311,6 +413,13 @@ function filterForm(p, types, torsions) {
     h('label', { style: 'display:grid;gap:2px;font-size:.92rem;margin-top:4px' }, 'Exact configuration',
       h('input', { type: 'text', name: 'config', id: 'f-config', placeholder: 'e.g. 16 I1, I4, IV', value: p.get('config') || '' }))));
 
+  form.append(h('fieldset', {}, h('legend', {}, 'Zeta function'),
+    h('label', { style: 'display:grid;gap:2px;font-size:.92rem' }, 'LMFDB label',
+      h('input', { type: 'text', name: 'zeta', id: 'f-zeta', placeholder: 'e.g. 2.20.a.o', value: p.get('zeta') || '' })),
+    h('p', { class: 'hint' }, 'The surfaces with one zeta function. The ', h('a', { href: '#/zeta' }, 'zeta functions tab'), ' lists the labels.')));
+
+  form.append(cyclotomicFieldset(p, orders), transcendentalFieldset(p));
+
   form.append(h('div', { class: 'actions' },
     h('button', { class: 'primary', type: 'submit', id: 'run-search' }, 'Search'),
     h('button', { type: 'button', id: 'reset-search', onclick: () => goSearch(new URLSearchParams()) }, 'Clear')));
@@ -321,7 +430,8 @@ function readForm(form, old) {
   const f = new FormData(form), p = new URLSearchParams();
   const a1 = f.getAll('a1');
   if (a1.length) p.set('a1', a1.join(','));
-  for (const name of ['torsion', 'ss', 'ord', 'L_sign', 'zeta_sign', 'count', 'config']) { const v = f.get(name); if (v) p.set(name, v.trim()); }
+  readCyclotomic(f, p);
+  for (const name of ['keys', 'torsion', 'ss', 'ord', 'L_sign', 'zeta_sign', 'count', 'config', 'zeta']) { const v = f.get(name); if (v) p.set(name, v.trim()); }
   for (const [col] of RANGES) for (const s of ['_min', '_max']) { const v = f.get(col + s); if (v !== '' && v !== null) p.set(col + s, v); }
   const [ty, de, ff, cc, mi] = ['fib_type', 'fib_deg', 'fib_f', 'fib_c', 'fib_min'].map(n => f.getAll(n));
   ty.forEach((t, i) => { const raw = [t, de[i], ff[i], cc[i], mi[i]].join('|'); if (raw.replace(/\|/g, '')) p.append('fib', raw); });
@@ -337,7 +447,7 @@ async function renderSearch(p) {
   view.replaceChildren(
     h('h1', {}, 'Search the census'),
     h('div', { class: 'search-layout' },
-      h('details', { class: 'filters', ...(wide || p.toString() ? { open: true } : {}) }, h('summary', {}, 'Filters'), filterForm(p, types, [...m.torsionGroups].sort(byTorsionOrder))),
+      h('details', { class: 'filters', ...(wide || p.toString() ? { open: true } : {}) }, h('summary', {}, 'Filters'), filterForm(p, types, [...m.torsionGroups].sort(byTorsionOrder), m.cyclotomicOrders || [])),
       results));
   runSearch(p, results, m);
 }
@@ -345,15 +455,16 @@ async function renderSearch(p) {
 async function runSearch(p, host, m) {
   const token = ++searchToken;
   const where = buildWhere(p);
-  const sortCol = COLUMNS.some(c => c[0] === p.get('sort')) ? p.get('sort') : 'key';
+  const sortCol = sortable(p.get('sort')) ? p.get('sort') : 'key';
   const dir = p.get('dir') === 'desc' ? 'DESC' : 'ASC';
   const page = Math.max(parseInt(p.get('page'), 10) || 1, 1);
   const cols = (p.get('cols') || '').split(',').filter(c => COLUMNS.some(d => d[0] === c));
   const shown = COLUMNS.filter(c => (cols.length ? cols : defaultCols).includes(c[0]));
   const offset = (page - 1) * PAGE_SIZE;
   const t0 = performance.now();
+  const mbs = m.sizesMB || {};
   host.replaceChildren(h('p', { class: 'status', id: 'search-status' }, enginePromise || !(where || sortCol !== 'key' || dir === 'DESC')
-    ? 'Searching…' : 'Downloading the search engine and the data (about 12 MB, or 25 MB with fibre filters). This happens once per visit; later searches are quick.'));
+    ? 'Searching…' : `Downloading the search engine and the data (about ${Math.round(mbs.surfaces)} MB, or ${Math.round(mbs.surfaces + mbs.fibres)} MB with fibre filters). This happens once per visit; later searches are quick.`));
   try {
     let rows, total;
     if (!where && sortCol === 'key' && dir === 'ASC') {
@@ -369,7 +480,7 @@ async function runSearch(p, host, m) {
       }
     } else {
       const conn = await engine();
-      if (where.includes('FROM fibres')) await conn.useFibres();
+      await attachFor(conn, where);
       if (token !== searchToken) return;
       const w = where ? 'WHERE ' + where : '';
       total = where ? Number((await sqlRows(conn, `SELECT COUNT(*) AS n FROM surfaces ${w}`))[0].n) : m.rows;
@@ -423,8 +534,8 @@ function drawResults(host, p, { rows, total, page, shown, sortCol, dir, seconds,
 
   const thead = h('tr', {}, shown.map(([id, label]) => h('th', {
     class: LEFT.has(id) ? 'left' : null,
-    'aria-sort': sortCol === id ? (dir === 'ASC' ? 'ascending' : 'descending') : 'none',
-  }, h('button', { type: 'button', 'data-sort': id, onclick: () => setParam({ sort: id, dir: sortCol === id && dir === 'ASC' ? 'desc' : 'asc', page: null }) },
+    'aria-sort': sortable(id) ? (sortCol === id ? (dir === 'ASC' ? 'ascending' : 'descending') : 'none') : null,
+  }, !sortable(id) ? labelNode(label) : h('button', { type: 'button', 'data-sort': id, onclick: () => setParam({ sort: id, dir: sortCol === id && dir === 'ASC' ? 'desc' : 'asc', page: null }) },
     labelNode(label), sortCol === id ? (dir === 'ASC' ? ' ▲' : ' ▼') : ''))));
   const tbody = h('tbody', {}, rows.map(r => h('tr', {}, shown.map(([id, , cell]) => {
     const v = cell(r);
@@ -452,8 +563,8 @@ async function downloadCsv(btn, where, sortCol, dir, total) {
   btn.textContent = 'Preparing…'; btn.disabled = true;
   try {
     const conn = await engine();
-    if (where.includes('FROM fibres')) await conn.useFibres();
-    const rows = await sqlRows(conn, `SELECT * FROM surfaces ${where ? 'WHERE ' + where : ''} ORDER BY ${sortCol} ${dir}, key`);
+    await attachFor(conn, where);
+    const rows = await sqlRows(conn, `SELECT * EXCLUDE (zid) FROM surfaces ${where ? 'WHERE ' + where : ''} ORDER BY ${sortCol} ${dir}, key`);
     const names = rows.length ? Object.keys(rows[0]) : [];
     const quote = (v) => { const s = v === null || v === undefined ? (v === null ? 'inf' : '') : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const text = [names.join(','), ...rows.map(r => names.map(n => quote(r[n])).join(','))].join('\n') + '\n';
@@ -540,6 +651,9 @@ async function renderSurface(keyText) {
   const partsTex = String.raw`\begin{aligned} \prod_{v} B_v(u) &= ${brokenLines(factorPieces(splitB))} \\ L(E/K,u) &= ${brokenLines(factorPieces(splitL))} \end{aligned}`;
   const code = magmaSnippet(r.key, p2);
   const codeElement = h('code', { class: 'language-magma' }, code);
+  const label = zetaLabel(p2);
+  const cycPart = cyclotomicPart(p2);
+  const trcId = transcendentalId(p2);
   const fact = (label, value) => h('div', {}, h('dt', {}, labelNode(label)), h('dd', {}, value));
 
   view.replaceChildren(back,
@@ -558,8 +672,10 @@ async function renderSurface(keyText) {
       fact('\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r.rho_geom),
       fact('Height', heightText(r.height)),
       fact('\\(\\#\\mathrm{Br}(X)\\cdot|\\mathrm{disc}\\,\\mathrm{NS}(X)|\\)', fmt(r.br_disc)),
+      fact('\\(d_{\\mathrm{NS}}\\)', String(cycPart.nsDegree)),
       fact('Sign of \\(L\\)', r.L_sign > 0 ? '+1' : '−1'),
       fact('Sign of \\(P_2\\)', r.zeta_sign > 0 ? '+1' : '−1')),
+    nsHint(),
 
     h('h2', {}, 'Singular fibres'),
     h('p', {}, T(configTex(r.config)), ` — ${r.n_singular} over the closure, at ${r.n_places} place${r.n_places === 1 ? '' : 's'} of `, T('\\mathbf F_2(T)'), '.'),
@@ -572,20 +688,25 @@ async function renderSurface(keyText) {
       })))),
     h('p', { class: 'hint' }, labelNode('\\(f_P\\) is the conductor exponent and \\(c_P\\) the Tamagawa number. The last column lists the sizes of the Frobenius orbits on the components that do not meet the zero section, as computed by ComponentCycles.')),
 
-    h('h2', {}, 'L-function'),
-    h('div', { class: 'wrapping', id: 'l-function' }, T(`L(E/K,u) = ${polyTex(r.L)}`)),
-    h('p', { class: 'hint' }, labelNode(`Here \\(K = \\mathbf F_2(T)\\) and \\(u = 2^{-s}\\); the degree is ${r.L_degree}.`)),
-
     h('h2', {}, 'Zeta function'),
     h('div', { class: 'formula' }, T('Z(X,u) = \\frac{1}{(1-u)\\,P_2(u)\\,(1-4u)}', true)),
     h('div', { class: 'formula', id: 'p2' }, T(p2Tex, true)),
     h('p', { class: 'hint' }, labelNode('The factor \\((1-2u)^2\\) comes from the zero section and a fibre.')),
+    phiHint(),
+    h('p', { class: 'hint' }, split.rest.length > 1
+      ? labelNode(`The cyclotomic factors have degrees adding up to \\(\\rho(X_{\\overline{\\mathbf F}_2})\\), and the exponent of \\(\\Phi_1\\) is \\(\\rho(X_{\\mathbf F_2})\\). The last factor, of degree ${split.rest.length - 1}, has no inverse root of the form \\(2\\zeta\\) and is not necessarily irreducible.`)
+      : labelNode('All inverse roots have the form \\(2\\zeta\\), \\(\\zeta\\) a root of unity, so the surface is supersingular.')),
+    h('p', { id: 'zeta-link' }, 'LMFDB label of this zeta function: ', h('a', { href: `#/zeta/${label}` }, label),
+      '. Its page lists the other surfaces of the census that share it.'),
+    h('p', { id: 'trc-link' }, 'Transcendental part: ', h('code', {}, trcId), '. ',
+      h('a', { href: `#/search?trc=${encodeURIComponent(trcId)}` }, 'Surfaces with the same transcendental part'), '.'),
     h('h3', {}, 'The contributions'),
     h('div', { class: 'formula', id: 'p2-parts' }, T(partsTex, true)),
     h('p', { class: 'hint' }, labelNode('Here \\(v\\) runs over the singular fibres, and \\(B_v(u) = \\det\\bigl(1 - (2u)^{\\deg v}\\,\\mathrm{Frob}_v\\bigr)\\) on the components of the fibre that do not meet the zero section.')),
-    h('p', { class: 'hint' }, split.rest.length > 1
-      ? labelNode(`Factors whose inverse roots have the form \\(2\\zeta\\), \\(\\zeta\\) a root of unity, come first; in \\(P_2\\) their degrees add up to \\(\\rho(X_{\\overline{\\mathbf F}_2})\\). The last factor, of degree ${split.rest.length - 1}, has no such inverse roots and is not necessarily irreducible.`)
-      : labelNode('All inverse roots have the form \\(2\\zeta\\), \\(\\zeta\\) a root of unity, so the surface is supersingular.')),
+    h('h3', {}, 'The L-function'),
+    h('div', { class: 'wrapping', id: 'l-function' }, T(`L(E/K,u) = ${polyTex(r.L)}`)),
+    h('p', { class: 'hint' }, labelNode(`Here \\(K = \\mathbf F_2(T)\\) and \\(u = 2^{-s}\\); the degree is ${r.L_degree}.`)),
+    phiList([...split.algebraic, ...splitB.algebraic, ...splitL.algebraic].map(a => a.n)),
 
     h('h2', {}, 'Points'),
     h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'points-table' },
@@ -604,24 +725,215 @@ async function renderSurface(keyText) {
 }
 
 // ---------------------------------------------------------------------------------------
+// Zeta functions: the ones that occur in the census, and the page of one of them
+// ---------------------------------------------------------------------------------------
+
+const Z_RANGES = [
+  ['n_surfaces', 'Surfaces in the census'], ['rho_f2', '\\(\\rho(X_{\\mathbf F_2})\\)'], ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)'],
+  ['height', 'Height (finite)'], ['br_disc', '\\(\\#\\mathrm{Br}\\cdot|\\mathrm{disc}\\,\\mathrm{NS}|\\)'], ['ns_degree', '\\(d_{\\mathrm{NS}}\\)'],
+  ['pts_f2', '\\(\\#X(\\mathbf F_2)\\)'], ['pts_f4', '\\(\\#X(\\mathbf F_4)\\)'], ['pts_f8', '\\(\\#X(\\mathbf F_8)\\)'],
+  ['pts_f16', '\\(\\#X(\\mathbf F_{16})\\)'], ['pts_f32', '\\(\\#X(\\mathbf F_{32})\\)'],
+];
+const Z_COLUMNS = [
+  ['label', 'LMFDB label', r => h('a', { href: `#/zeta/${r.label}` }, r.label)],
+  ['cyc', 'Cyclotomic part', r => T(cycTex(r.cyc)), false],
+  ['trc', 'Transcendental part', r => trcLink(r.trc), false],
+  ['n_surfaces', 'Surfaces', r => h('a', { href: `#/search?zeta=${r.label}` }, fmt(r.n_surfaces))],
+  ['ns_degree', '\\(d_{\\mathrm{NS}}\\)', r => r.ns_degree],
+  ['rho_f2', '\\(\\rho(X_{\\mathbf F_2})\\)', r => r.rho_f2],
+  ['rho_geom', '\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r => r.rho_geom],
+  ['height', 'Height', r => heightText(r.height)],
+  ['br_disc', '\\(\\#\\mathrm{Br}\\cdot|\\mathrm{disc}\\,\\mathrm{NS}|\\)', r => fmt(r.br_disc)],
+  ['zeta_sign', 'Sign of \\(P_2\\)', r => r.zeta_sign > 0 ? '+1' : '−1'],
+  ['pts_f2', '\\(\\#X(\\mathbf F_2)\\)', r => fmt(r.pts_f2)],
+  ['pts_f4', '\\(\\#X(\\mathbf F_4)\\)', r => fmt(r.pts_f4)],
+  ['pts_f8', '\\(\\#X(\\mathbf F_8)\\)', r => fmt(r.pts_f8)],
+];
+const goZeta = (p) => { location.hash = '#/zeta?' + p.toString(); };
+
+function zetaWhere(p) {
+  // The SQL condition of a search for zeta functions.  Input: URLSearchParams.  Output: a SQL string.
+  const out = cyclotomicConditions(p);
+  for (const [col] of Z_RANGES) {
+    const lo = parseInt(p.get(col + '_min'), 10), hi = parseInt(p.get(col + '_max'), 10);
+    if (Number.isFinite(lo)) out.push(`${col} >= ${lo}`);
+    if (Number.isFinite(hi)) out.push(`${col} <= ${hi}`);
+  }
+  const sign = p.get('zeta_sign');
+  if (sign === '1' || sign === '-1') out.push(`zeta_sign = ${sign}`);
+  if (p.get('ss') === '1') out.push('height IS NULL');
+  if (p.get('ss') === '0') out.push('height IS NOT NULL');
+  if (p.get('ord') === '1') out.push('height = 1');
+  if (p.get('ord') === '0') out.push('(height IS NULL OR height > 1)');
+  return out.join(' AND ');
+}
+
+async function renderZetaList(p) {
+  const m = await getManifest();
+  const selects = [['ss', 'Supersingular', [['', 'Any'], ['1', 'Yes'], ['0', 'No']]], ['ord', 'Ordinary', [['', 'Any'], ['1', 'Yes'], ['0', 'No']]],
+                   ['zeta_sign', 'Sign of \\(P_2\\)', [['', 'Any'], ['1', '+1'], ['-1', '−1']]]];
+  const form = h('form', { id: 'zeta-form', onsubmit: (e) => {
+    e.preventDefault();
+    const f = new FormData(form), q = new URLSearchParams();
+    for (const [name] of selects) if (f.get(name)) q.set(name, f.get(name));
+    for (const [col] of Z_RANGES) for (const s of ['_min', '_max']) if (f.get(col + s)) q.set(col + s, f.get(col + s));
+    readCyclotomic(f, q);
+    for (const k of ['sort', 'dir']) if (p.get(k)) q.set(k, p.get(k));
+    goZeta(q);
+  } },
+    h('fieldset', {}, h('legend', {}, 'Special classes'),
+      selects.map(([name, label, options]) => h('label', { class: 'field field-select' }, labelNode(label),
+        h('select', { name, id: 'z-' + name }, options.map(([v, t]) => h('option', { value: v, ...(p.get(name) === v ? { selected: true } : {}) }, t)))))),
+    h('fieldset', {}, h('legend', {}, 'Ranges (from, to)'),
+      Z_RANGES.map(([col, label]) => h('div', { class: 'field' }, labelNode(label),
+        h('input', { type: 'number', min: 0, name: col + '_min', id: `z-${col}-min`, 'aria-label': 'minimum', value: p.get(col + '_min') || '' }),
+        h('input', { type: 'number', min: 0, name: col + '_max', id: `z-${col}-max`, 'aria-label': 'maximum', value: p.get(col + '_max') || '' })))),
+    cyclotomicFieldset(p, m.cyclotomicOrders || []),
+    transcendentalFieldset(p),
+    h('div', { class: 'actions' },
+      h('button', { class: 'primary', type: 'submit', id: 'run-zeta' }, 'Search'),
+      h('button', { type: 'button', onclick: () => goZeta(new URLSearchParams()) }, 'Clear')));
+  const results = h('section', { id: 'zeta-results', 'aria-live': 'polite' });
+  const wide = window.matchMedia('(min-width: 901px)').matches;
+  view.replaceChildren(
+    h('h1', {}, 'Zeta functions in the census'),
+    h('p', { class: 'prose', id: 'zeta-intro' }, `The ${fmt(m.rows)} surfaces of this release have ${fmt(m.zetas)} different zeta functions. Each is named by the label that the LMFDB gives it in its table of motives of K3 type over finite fields.`,
+      m.missing ? ' More will appear as the census is completed.' : ''),
+    h('div', { class: 'search-layout' },
+      h('details', { class: 'filters', ...(wide || p.toString() ? { open: true } : {}) }, h('summary', {}, 'Filters'), form),
+      results));
+
+  const token = ++searchToken;
+  const where = zetaWhere(p), w = where ? 'WHERE ' + where : '';
+  const zSortable = (id) => Z_COLUMNS.some(c => c[0] === id && c[3] !== false);
+  const sortCol = zSortable(p.get('sort')) ? p.get('sort') : 'n_surfaces';
+  const dir = p.has('sort') ? (p.get('dir') === 'desc' ? 'DESC' : 'ASC') : 'DESC';
+  const page = Math.max(parseInt(p.get('page'), 10) || 1, 1);
+  results.replaceChildren(h('p', { class: 'status' }, zetaReady ? 'Searching…' : `Downloading the search engine and the zeta functions (about ${Math.round((m.sizesMB || {}).zeta || 8)} MB). This happens once per visit.`));
+  try {
+    const conn = await engine();
+    await conn.useZeta();
+    await attachFor(conn, where);
+    const total = where ? Number((await sqlRows(conn, `SELECT COUNT(*) AS n FROM zeta ${w}`))[0].n) : m.zetas;
+    const rows = await sqlRows(conn, `SELECT * FROM zeta ${w} ORDER BY ${sortCol} ${dir} ${dir === 'DESC' ? 'NULLS FIRST' : 'NULLS LAST'}, zid LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`);
+    if (token !== searchToken) return;
+    window.__censusLastSearch = { total, where };
+    const setParam = (changes) => {
+      const q = new URLSearchParams(p);
+      for (const [k, v] of Object.entries(changes)) { if (v === null) q.delete(k); else q.set(k, v); }
+      goZeta(q);
+    };
+    const pages = Math.max(Math.ceil(total / PAGE_SIZE), 1);
+    const showing = total ? `${fmt((page - 1) * PAGE_SIZE + 1)}–${fmt(Math.min(page * PAGE_SIZE, total))}` : '0';
+    const nodes = [h('div', { class: 'result-bar' },
+      h('span', { class: 'count', id: 'zeta-count' }, `${fmt(total)} zeta function${total === 1 ? '' : 's'}`),
+      h('span', { class: 'muted' }, `showing ${showing}`))];
+    if (!rows.length) nodes.push(h('p', { class: 'status' }, 'No zeta function in the census matches these filters.'));
+    else nodes.push(
+      h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'zeta-table' },
+        h('thead', {}, h('tr', {}, Z_COLUMNS.map(([id, label], i) => h('th', {
+          class: i <= 2 ? 'left' : null, 'aria-sort': zSortable(id) ? (sortCol === id ? (dir === 'ASC' ? 'ascending' : 'descending') : 'none') : null,
+        }, !zSortable(id) ? labelNode(label) : h('button', { type: 'button', 'data-sort': id, onclick: () => setParam({ sort: id, dir: sortCol === id && dir === 'ASC' ? 'desc' : 'asc', page: null }) },
+          labelNode(label), sortCol === id ? (dir === 'ASC' ? ' ▲' : ' ▼') : ''))))),
+        h('tbody', {}, rows.map(r => h('tr', {}, Z_COLUMNS.map(([, , cell], i) => {
+          const v = cell(r);
+          return h('td', { class: i <= 2 ? 'left' : null }, typeof v === 'number' ? String(v) : v);
+        })))))),
+      h('div', { class: 'pager' },
+        h('button', { type: 'button', disabled: page <= 1, onclick: () => setParam({ page: page - 1 }) }, 'Previous'),
+        h('span', { class: 'muted' }, `Page ${fmt(page)} of ${fmt(pages)}`),
+        h('button', { type: 'button', disabled: page >= pages, onclick: () => setParam({ page: page + 1 }) }, 'Next')));
+    results.replaceChildren(...nodes);
+  } catch (err) {
+    if (token !== searchToken) return;
+    window.__censusLastError = String(err);
+    results.replaceChildren(h('p', { class: 'error', role: 'alert' }, 'The search could not run: ' + (err.message || err) +
+      '. Check your connection and try again. If it persists, try another browser.'));
+  }
+}
+
+async function renderZeta(label) {
+  const back = h('p', {}, h('a', { href: '#/zeta' }, 'Back to zeta functions'));
+  if (!ZETA_LABEL.test(label)) {
+    view.replaceChildren(back, h('h1', {}, 'Not a label'), h('p', {}, `“${label}” is not the label of a zeta function. Labels look like 2.20.a.o.`));
+    return;
+  }
+  view.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
+  const conn = await engine();
+  await conn.useZeta();
+  const [r] = await sqlRows(conn, `SELECT * FROM zeta WHERE label = '${label}'`);
+  if (!r) {
+    view.replaceChildren(back, h('h1', {}, `Zeta function ${label}`),
+      h('p', { id: 'zeta-absent' }, 'No surface of this release has this zeta function. It may still be the zeta function of a K3 surface outside the census, or of a surface that has not been computed yet.'));
+    return;
+  }
+  const p2 = r.p2.split(' ').map(Number);
+  const split = splitP2(p2);
+  // 2 P2(T/2) = prod Phi_n(T)^e * 2 Q(T/2), with 2 Q(T/2) integral
+  const splitT = { algebraic: split.algebraic, rest: split.rest.map((c, i) => c * 2 / 2 ** i) };
+  const p2Tex = String.raw`\begin{aligned} P_2(u) &= ${brokenLines(polyTerms(p2))} \\ &= ${brokenLines(factorPieces(split))} \end{aligned}`;
+  const lmfdbTex = String.raw`\begin{aligned} P(T) = 2\,P_2(T/2) &= ${brokenLines(polyTerms(lmfdbPoly(p2), 'T'))} \\ &= ${brokenLines(factorPieces(splitT, 'T', 'T'))} \end{aligned}`;
+  const fact = (name, value) => h('div', {}, h('dt', {}, labelNode(name)), h('dd', {}, value));
+  view.replaceChildren(back,
+    h('h1', { id: 'zeta-title' }, `Zeta function ${label}`),
+    h('div', { class: 'formula' }, T('Z(X,u) = \\frac{1}{(1-u)\\,P_2(u)\\,(1-4u)}', true)),
+    h('div', { class: 'formula', id: 'zeta-p2' }, T(p2Tex, true)),
+    phiHint(),
+    h('p', {}, 'Cyclotomic part: ', T(cycTex(r.cyc)), '. ', h('a', { href: `#/zeta?cyc_exact=${encodeURIComponent(r.cyc)}` }, 'Zeta functions with the same cyclotomic part'), '.'),
+    h('p', { id: 'zeta-trc' }, 'Transcendental part: ', h('code', {}, r.trc), '. ', h('a', { href: `#/zeta?trc=${encodeURIComponent(r.trc)}` }, 'Zeta functions with the same transcendental part'),
+      ', ', h('a', { href: `#/search?trc=${encodeURIComponent(r.trc)}` }, 'surfaces with it'), '.'),
+    phiList(split.algebraic.map(a => a.n)),
+
+    h('h2', {}, 'Surfaces in the census'),
+    h('p', { id: 'zeta-surfaces' }, r.n_surfaces === 1 ? 'One surface of this release has this zeta function: ' : `${fmt(r.n_surfaces)} surfaces of this release have this zeta function. `,
+      r.n_surfaces === 1 ? h('a', { href: `#/surface/${r.first_key}` }, `surface ${r.first_key}`) : h('a', { href: `#/search?zeta=${label}` }, 'Show them'), '.'),
+
+    h('h2', {}, 'Invariants'),
+    h('dl', { class: 'facts', id: 'zeta-invariants' },
+      fact('\\(\\rho(X_{\\mathbf F_2})\\)', r.rho_f2),
+      fact('\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', r.rho_geom),
+      fact('Height', heightText(r.height)),
+      fact('\\(\\#\\mathrm{Br}(X)\\cdot|\\mathrm{disc}\\,\\mathrm{NS}(X)|\\)', fmt(r.br_disc)),
+      fact('\\(d_{\\mathrm{NS}}\\)', String(r.ns_degree)),
+      fact('Sign of \\(P_2\\)', r.zeta_sign > 0 ? '+1' : '−1')),
+    h('p', { class: 'hint' }, 'These depend only on the zeta function, so every surface with it has the same values.'),
+    nsHint(),
+
+    h('h2', {}, 'Points'),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+      h('thead', {}, h('tr', {}, ['2', '4', '8', '16', '32'].map(q => h('th', {}, T(`\\#X(\\mathbf F_{${q}})`))))),
+      h('tbody', {}, h('tr', {}, [r.pts_f2, r.pts_f4, r.pts_f8, r.pts_f16, r.pts_f32].map(v => h('td', {}, fmt(v))))))),
+
+    h('h2', {}, 'In the LMFDB'),
+    h('div', { class: 'formula', id: 'zeta-lmfdb' }, T(lmfdbTex, true)),
+    h('p', { class: 'hint' }, labelNode(`The LMFDB stores this polynomial, whose roots lie on the unit circle, in its table of motives of K3 type over finite fields. The label ${label} has the form 2.\\(\\rho\\).c.t, where \\(\\rho\\) is the geometric Picard number, c numbers the cyclotomic factors of \\(P\\) and t encodes the coefficients of the remaining factor.`)));
+}
+
+// ---------------------------------------------------------------------------------------
 // Statistics
 // ---------------------------------------------------------------------------------------
 
-function barChart(rows, { series = 1, labels = null, xTitle = '' }) {
+function barChart(rows, { series = 1, labels = null, xTitle = '', log = false }) {
   // A bar chart with a tooltip.
   //   Input:  rows, a list of [x, count] or [x, [count1, count2]]; series, 1 or 2;
-  //           labels, the names of the two series; xTitle, a caption for the axis
+  //           labels, the names of the two series; xTitle, a caption for the axis;
+  //           log, a logarithmic vertical scale (for one series), with gridlines at powers of 10
   //   Output: an element holding the chart
   const W = 520, H = 210, m = { t: 8, r: 6, b: 38, l: 48 };
   const vals = rows.map(([, v]) => Array.isArray(v) ? v : [v, 0]);
   const top = Math.max(...vals.map(v => v[0] + v[1]), 1);
-  const nice = (() => { const p = 10 ** Math.floor(Math.log10(top)); for (const k of [1, 2, 4, 8, 10]) if (k * p >= top) return k * p; return top; })();
+  const nice = log ? 10 ** Math.ceil(Math.log10(top))
+    : (() => { const p = 10 ** Math.floor(Math.log10(top)); for (const k of [1, 2, 4, 8, 10]) if (k * p >= top) return k * p; return top; })();
   const ns = 'http://www.w3.org/2000/svg';
   const el = (tag, attrs, text) => { const e = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); if (text !== undefined) e.textContent = text; return e; };
   const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
-  const y = (v) => H - m.b - (v / nice) * (H - m.t - m.b);
-  for (let i = 0; i <= 4; i++) {
-    const v = nice * i / 4;
+  // On the log scale the baseline is 1/2, so that a bar of 1 still shows, reaching the gridline at 1.
+  const lo = Math.log10(0.5), hiLog = Math.log10(nice);
+  const y = log
+    ? (v) => H - m.b - (v > 0 ? (Math.log10(v) - lo) / (hiLog - lo) : 0) * (H - m.t - m.b)
+    : (v) => H - m.b - (v / nice) * (H - m.t - m.b);
+  const ticks = log ? Array.from({ length: hiLog + 1 }, (_, i) => 10 ** i) : [0, 1, 2, 3, 4].map(i => nice * i / 4);
+  for (const v of ticks) {
     svg.append(el('line', { x1: m.l, x2: W - m.r, y1: y(v), y2: y(v), stroke: 'var(--line)', 'stroke-width': 1 }));
     svg.append(el('text', { class: 'tick', x: m.l - 6, y: y(v) + 4, 'text-anchor': 'end' }, v >= 1e6 ? (v / 1e6) + 'M' : v >= 1000 ? (v / 1000) + 'k' : String(v)));
   }
@@ -653,6 +965,46 @@ function barChart(rows, { series = 1, labels = null, xTitle = '' }) {
   return box;
 }
 
+function pieChart(rows) {
+  // A pie chart with a legend that carries the values, and a tooltip.
+  //   Input:  rows, a list of [label, count] with at most two entries (series1, series2)
+  //   Output: an element holding the chart
+  const total = rows.reduce((s, [, v]) => s + v, 0) || 1;
+  const ns = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs) => { const e = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); return e; };
+  const svg = el('svg', { viewBox: '0 0 200 200', role: 'img', class: 'pie' });
+  const box = h('div', { class: 'chart-box pie-box' });
+  const tip = h('div', { class: 'tip', hidden: true });
+  const pct = (v) => `${(100 * v / total).toFixed(1)}%`;
+  let angle = -Math.PI / 2;
+  rows.forEach(([label, v], i) => {
+    const a = 2 * Math.PI * v / total, end = angle + a;
+    const pt = (t) => `${100 + 92 * Math.cos(t)} ${100 + 92 * Math.sin(t)}`;
+    const d = a >= 2 * Math.PI - 1e-9
+      ? 'M 8 100 A 92 92 0 1 1 192 100 A 92 92 0 1 1 8 100 Z'
+      : `M 100 100 L ${pt(angle)} A 92 92 0 ${a > Math.PI ? 1 : 0} 1 ${pt(end)} Z`;
+    // A 2px surface-coloured edge separates the slices.
+    const slice = el('path', { d, fill: `var(--series${i + 1})`, stroke: 'var(--bg)', 'stroke-width': 2, 'stroke-linejoin': 'round', tabindex: 0 });
+    const show = (ev) => {
+      tip.textContent = `${label}: ${fmt(v)} surfaces (${pct(v)})`;
+      tip.hidden = false;
+      const rect = box.getBoundingClientRect();
+      const px = (ev.clientX ?? slice.getBoundingClientRect().left) - rect.left;
+      tip.style.top = '0';
+      tip.style.left = Math.max(0, Math.min(px + 10, rect.width - tip.offsetWidth)) + 'px';
+    };
+    slice.addEventListener('pointermove', show); slice.addEventListener('focus', show);
+    slice.addEventListener('pointerleave', () => { tip.hidden = true; }); slice.addEventListener('blur', () => { tip.hidden = true; });
+    svg.append(slice);
+    angle = end;
+  });
+  const legend = h('ul', { class: 'pie-legend' }, rows.map(([label, v], i) => h('li', {},
+    h('i', { style: `background:var(--series${i + 1})` }), h('span', { class: 'pie-label' }, label),
+    h('span', { class: 'pie-value' }, fmt(v)), h('span', { class: 'pie-share' }, pct(v)))));
+  box.append(svg, legend, tip);
+  return box;
+}
+
 async function renderStats() {
   view.replaceChildren(h('p', { class: 'muted' }, 'Loading…'));
   const [s, m] = await Promise.all([fetchJson('data/stats.json'), getManifest()]);
@@ -661,27 +1013,30 @@ async function renderStats() {
   const j0Names = ['a1 ≠ 0', 'a1 = 0'], ordNames = ['a1 = 0 or s²', 'a1 = st or s²+st+t²'];
   const binned = (rows, w) => rows.map(([x, v]) => [w === 1 ? x : `${x}`, v]);
   const brRows = s.br.map(([k, v]) => [k === 0 ? '1' : `2^${k}`, v]);
+  // +1 first, then −1, so that each sign keeps its colour.
+  const signRows = (rows) => ['1', '-1'].map(x => [x === '1' ? '+1' : '−1', (rows.find(r => String(r[0]) === x) || [0, 0])[1]]);
 
   view.replaceChildren(
     h('h1', {}, 'Statistics'),
-    h('p', { class: 'prose', id: 'stats-warning' }, h('strong', {}, 'These charts describe incomplete data. '),
-      `They cover ${fmt(m.rows)} of the ${fmt(m.models)} surfaces. Surfaces with `, T('a_1 = s^2+st+t^2'), ' are only ',
-      `${Math.round(100 * m.rowsByA1['s^2 + s*t + t^2'] / m.expectedByA1['s^2 + s*t + t^2'])}% present, so the overall proportions will change when the census is complete. Counts are not weighted by automorphisms.`),
+    m.missing
+      ? h('p', { class: 'prose', id: 'stats-warning' }, h('strong', {}, 'These charts describe incomplete data. '),
+          `They cover ${fmt(m.rows)} of the ${fmt(m.models)} surfaces, so the proportions will change when the census is complete. Counts are not weighted by automorphisms.`)
+      : h('p', { class: 'prose', id: 'stats-warning' }, `These charts cover all ${fmt(m.models)} elliptic K3 surfaces of the census, counted once each: counts are not weighted by automorphisms.`),
 
-    h('h2', {}, 'Completeness'),
-    h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'completeness' },
+    m.missing ? h('h2', {}, 'Completeness') : '',
+    m.missing ? h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'completeness' },
       h('thead', {}, h('tr', {}, ['\\(a_1\\)', 'In this release', 'In the census', 'Share'].map((t, i) => h('th', { class: i === 0 ? 'left' : null }, labelNode(t))))),
       h('tbody', {}, Object.keys(m.expectedByA1).map(a => h('tr', {}, h('td', { class: 'left' }, T(a1Tex(a))), h('td', {}, fmt(m.rowsByA1[a] || 0)), h('td', {}, fmt(m.expectedByA1[a])),
-        h('td', {}, `${(100 * (m.rowsByA1[a] || 0) / m.expectedByA1[a]).toFixed(1)}%`)))))),
+        h('td', {}, `${(100 * (m.rowsByA1[a] || 0) / m.expectedByA1[a]).toFixed(1)}%`)))))) : '',
 
     h('h2', {}, 'Mordell–Weil and L-function'),
     h('div', { class: 'charts' },
       card('Rank of \\(E(\\overline{\\mathbf F}_2(T))\\)', String.raw`\(\rho(X_{\overline{\mathbf F}_2}) - 2 - \sum_v \deg v\,(m_v - 1)\), where \(m_v\) is the number of components of the fibre at \(v\) (Shioda–Tate).`, barChart(s.rank_geom, { xTitle: 'rank' })),
       card('Rank of \\(E(\\mathbf F_2(T))\\)', 'Computed as the order of vanishing of \\(L(E,s)\\) at \\(s=1\\), which equals the rank for these surfaces.', barChart(s.rank, { xTitle: 'rank' })),
-      card('Torsion of \\(E(\\mathbf F_2(T))\\)', 'Subgroup of the Mordell–Weil group.', barChart([...s.torsion].sort((a, b) => byTorsionOrder(a[0], b[0])), { xTitle: 'torsion group' })),
+      card('Torsion of \\(E(\\mathbf F_2(T))\\)', 'Subgroup of the Mordell–Weil group. Logarithmic scale.', barChart([...s.torsion].sort((a, b) => byTorsionOrder(a[0], b[0])), { xTitle: 'torsion group', log: true })),
       card('Degree of \\(L\\)', 'Equal to 20 minus the rank of the root lattices of the fibres.', barChart(s.L_degree, { xTitle: 'degree' })),
-      card('Sign of \\(L\\)', 'In \\(L(E,u) = \\varepsilon\\,(2u)^n L(E,1/(4u))\\).', barChart(s.L_sign.map(([x, v]) => [Number(x) > 0 ? '+1' : '−1', v]), { xTitle: 'sign' })),
-      card('Sign of \\(P_2\\)', 'In \\(P_2(u) = \\varepsilon_Z\\,(2u)^{22} P_2(1/(4u))\\).', barChart(s.zeta_sign.map(([x, v]) => [Number(x) > 0 ? '+1' : '−1', v]), { xTitle: 'sign' }))),
+      card('Sign of \\(L\\)', 'In \\(L(E,u) = \\varepsilon\\,(2u)^n L(E,1/(4u))\\).', pieChart(signRows(s.L_sign))),
+      card('Sign of \\(P_2\\)', 'In \\(P_2(u) = \\varepsilon_Z\\,(2u)^{22} P_2(1/(4u))\\).', pieChart(signRows(s.zeta_sign)))),
 
     h('h2', {}, 'Singular fibres'),
     h('div', { class: 'charts' },
@@ -694,7 +1049,8 @@ async function renderStats() {
       card('\\(\\rho(X_{\\mathbf F_2})\\)', 'Picard number over \\(\\mathbf F_2\\).', barChart(s.rho_f2, { xTitle: 'Picard number' })),
       card('\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)', 'Picard number over the closure.', barChart(s.rho_geom, { xTitle: 'geometric Picard number' })),
       card('Height of the formal Brauer group', '1 is ordinary and \\(\\infty\\) is supersingular.', barChart(s.height, { series: 2, labels: ordNames, xTitle: 'height' }), ['\\(a_1 = 0\\) or \\(s^2\\)', '\\(a_1 = st\\) or \\(s^2+st+t^2\\)']),
-      card('\\(\\#\\mathrm{Br}(X)\\cdot|\\mathrm{disc}\\,\\mathrm{NS}(X)|\\)', 'Over \\(\\mathbf F_2\\), grouped by powers of 2: the bar \\(2^k\\) covers \\([2^k, 2^{k+1})\\).', barChart(brRows, { xTitle: 'lower end of the range' }))),
+      card('\\(\\#\\mathrm{Br}(X)\\cdot|\\mathrm{disc}\\,\\mathrm{NS}(X)|\\)', 'Over \\(\\mathbf F_2\\), grouped by powers of 2: the bar \\(2^k\\) covers \\([2^k, 2^{k+1})\\).', barChart(brRows, { xTitle: 'lower end of the range' })),
+      s.ns_degree ? card('\\(d_{\\mathrm{NS}}\\)', 'The degree of the smallest extension of \\(\\mathbf F_2\\) over which \\(\\mathrm{NS}(X_{\\overline{\\mathbf F}_2})\\) is defined. Only the degrees that occur are shown.', barChart(s.ns_degree, { xTitle: 'degree' })) : null),
 
     h('h2', {}, 'Points'),
     h('div', { class: 'charts' }, ['2', '4', '8', '16', '32'].map(q => {
@@ -708,6 +1064,24 @@ async function renderStats() {
       h('thead', {}, h('tr', {}, h('th', { class: 'left' }, 'Configuration'), h('th', {}, 'Surfaces'))),
       h('tbody', {}, s.configurations.top.map(([c, n]) => h('tr', {}, h('td', { class: 'left' },
         h('a', { href: '#/search?config=' + encodeURIComponent(c) }, T(configTex(c)))), h('td', {}, fmt(n))))))),
+
+    s.cycParts ? h('h2', {}, 'Most common cyclotomic parts') : '',
+    s.cycParts ? h('p', { class: 'hint' }, labelNode(`${fmt(s.cycParts.distinct)} cyclotomic parts \\(\\prod_n \\Phi_n(2u)^{e_n}\\) of \\(P_2\\) occur. The 30 most common, by the number of surfaces:`)) : '',
+    s.cycParts ? h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'top-cyc' },
+      h('thead', {}, h('tr', {}, h('th', { class: 'left' }, 'Cyclotomic part'), h('th', {}, labelNode('\\(\\rho(X_{\\overline{\\mathbf F}_2})\\)')), h('th', {}, 'Surfaces'), h('th', {}, 'Zeta functions'))),
+      h('tbody', {}, s.cycParts.top.map(([c, ns, nz]) => h('tr', {},
+        h('td', { class: 'left' }, h('a', { href: '#/search?cyc_exact=' + encodeURIComponent(c) }, T(cycTex(c)))),
+        h('td', {}, String(c.split(' ').reduce((s, f) => { const [n, e] = f.split('^'); return s + cyclotomicDegree(Number(n)) * Number(e || 1); }, 0))),
+        h('td', {}, fmt(ns)), h('td', {}, h('a', { href: '#/zeta?cyc_exact=' + encodeURIComponent(c) }, fmt(nz)))))))) : '',
+
+    s.trcParts ? h('h2', {}, 'Most common transcendental parts') : '',
+    s.trcParts ? h('p', { class: 'hint' }, labelNode(`${fmt(s.trcParts.distinct)} transcendental parts occur, written here in the LMFDB’s normalisation \\(2\\,Q(T/2)\\), whose roots lie on the unit circle; the name is the degree followed by the last part of the LMFDB label. The 30 most common, by the number of surfaces:`)) : '',
+    s.trcParts ? h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'top-trc' },
+      h('thead', {}, h('tr', {}, h('th', { class: 'left' }, 'Name'), h('th', { class: 'left' }, labelNode('\\(2\\,Q(T/2)\\)')), h('th', {}, 'Surfaces'), h('th', {}, 'Zeta functions'))),
+      h('tbody', {}, s.trcParts.top.map(([t, ns, nz]) => h('tr', {},
+        h('td', { class: 'left' }, h('a', { href: '#/search?trc=' + encodeURIComponent(t) }, t)),
+        h('td', { class: 'left poly-cell' }, T(trcTex(t))),
+        h('td', {}, fmt(ns)), h('td', {}, h('a', { href: '#/zeta?trc=' + encodeURIComponent(t) }, fmt(nz)))))))) : '',
 
     h('h2', {}, 'By class of a₁'),
     h('div', { class: 'table-wrap' }, h('table', { class: 'data', id: 'by-a1' },
@@ -735,26 +1109,28 @@ async function renderMethod() {
     h('ul', {},
       h('li', {}, labelNode('\\(P_2(u) = (1-2u)^2 \\prod_v F_v(u)\\,L(E,u)\\), where \\(F_v\\) comes from the Frobenius action on the fibre components.')),
       h('li', {}, labelNode('The Picard numbers, read off from the inverse roots of \\(P_2\\) using the Tate conjecture.')),
+      h('li', {}, labelNode('The cyclotomic part \\(\\prod_n \\Phi_n(2u)^{e_n}\\) of \\(P_2\\), and \\(d_{\\mathrm{NS}}\\), the least common multiple of the \\(n\\) that occur: Frobenius acts on \\(\\mathrm{NS}(X_{\\overline{\\mathbf F}_2})\\) with finite order, and its eigenvalues are the roots of unity \\(\\zeta\\) with \\(2\\zeta\\) an inverse root of \\(P_2\\), so \\(\\mathrm{NS}(X_{\\overline{\\mathbf F}_2})\\) is defined over \\(\\mathbf F_{2^d}\\) exactly when \\(d_{\\mathrm{NS}}\\) divides \\(d\\).')),
+      h('li', {}, labelNode('The LMFDB label of the zeta function, as in the LMFDB’s table of motives of K3 type over finite fields.')),
       h('li', {}, labelNode('The height, from the 2-adic Newton polygon of \\(P_2\\), and \\(\\#\\mathrm{Br}(X)\\cdot|\\mathrm{disc}\\,\\mathrm{NS}(X)|\\), from the Artin–Tate formula.')),
       h('li', {}, labelNode('The point counts \\(\\#X(\\mathbf F_{2^r})\\), from the zeta function.'))),
     h('h2', {}, 'Checks'),
     h('ul', {},
       h('li', {}, labelNode('The orbit counts agree with an independent Burnside count over all \\(2^{37}\\) models.')),
       h('li', {}, 'The minimality filter agrees with Magma’s Tate algorithm on all census representatives with a high discriminant valuation at a candidate place, and on 20,000 random others.'),
-      h('li', {}, labelNode('Every row of this release has Euler number 24 by Ogg’s formula, and its stored \\(P_2\\) agrees with the one recomputed from \\(L\\) and the fibres when the site’s data is built. The Picard numbers were re-derived on a 2% sample.'))),
+      h('li', {}, labelNode('Every row of this release has Euler number 24 by Ogg’s formula, and its stored \\(P_2\\) agrees with the one recomputed from \\(L\\) and the fibres when the site’s data is built. The Picard numbers are re-derived from \\(P_2\\) for every row, and surfaces with the same \\(P_2\\) agree on every invariant that \\(P_2\\) determines.'))),
     para('Not yet done: a comparison with an outside count, and the automorphism groups needed for a mass formula check.'),
     h('h2', {}, 'Status of this release'),
-    h('p', { id: 'release-status' }, `${fmt(m.rows)} of ${fmt(m.models)} surfaces are present. Quasi-elliptic surfaces are not included yet. Data file: ${m.source}, built ${m.built} from census commit ${m.censusCommit}.`),
+    h('p', { id: 'release-status' }, `${m.missing ? `${fmt(m.rows)} of ${fmt(m.models)} surfaces are present.` : `All ${fmt(m.models)} elliptic surfaces are present.`} Quasi-elliptic surfaces are not included yet. Data file: ${m.source}${m.release ? ` (release ${m.release})` : ''}, built ${m.built} from census commit ${m.censusCommit}.`),
     h('h2', {}, 'Code'),
     h('p', {}, h('a', { href: REPO }, 'The census repository'), ' has the enumeration (elliptic_fibration_orbits_f2.m), the minimality test (k3_minimality_f2.m), the invariants (functions_census.m) and the driver (run_census.m). Each surface’s page has a Magma snippet that reproduces it.')));
 }
 
 async function renderCite() {
   const m = await getManifest();
-  const cite = `Elise Alvarez-Salazar, Edgar Costa, Håvard Damm-Johnsen and Alvaro Gonzalez-Hernandez, Census of elliptic and quasielliptic K3 surfaces over F2, preview, ${m.built.slice(0, 4)}. ${location.origin}${location.pathname}`;
+  const cite = `Elise Alvarez-Salazar, Asher Auel, Edgar Costa, Håvard Damm-Johnsen and Alvaro Gonzalez-Hernandez, Census of elliptic and quasielliptic K3 surfaces over F2, preview, ${m.built.slice(0, 4)}. ${location.origin}${location.pathname}`;
   view.replaceChildren(h('div', { class: 'prose' },
     h('h1', {}, 'How to reference'),
-    h('p', { id: 'cite-warning' }, h('strong', {}, 'Please don’t cite this preview yet. '), 'The data is incomplete and may change. A release with a Zenodo DOI, and a paper, will follow.'),
+    h('p', { id: 'cite-warning' }, h('strong', {}, 'Please don’t cite this preview yet. '), m.missing ? 'The data is incomplete and may change. A release' : 'The data may still change. A release with a Zenodo DOI, and a paper, will follow.'),
     h('h2', {}, 'Draft citation'),
     h('pre', { id: 'citation', style: 'white-space:pre-wrap' }, cite),
     h('h2', {}, 'Referring to a surface'),
@@ -779,6 +1155,7 @@ async function route() {
   try {
     if (section === 'search') await renderSearch(parseHashParams(qs));
     else if (section === 'surface') await renderSurface(parts[1] || '');
+    else if (section === 'zeta') await (parts[1] ? renderZeta(decodeURIComponent(parts[1])) : renderZetaList(parseHashParams(qs)));
     else if (section === 'stats') await renderStats();
     else if (section === 'method') await renderMethod();
     else if (section === 'cite') await renderCite();
@@ -793,6 +1170,7 @@ async function route() {
 async function start() {
   const m = await getManifest().catch(() => null);
   if (m && m.missing) document.getElementById('banner').textContent = `Preview: incomplete data, do not cite. ${fmt(m.rows)} of ${fmt(m.models)} surfaces are present.`;
+  else if (m) document.getElementById('banner').textContent = 'Preview: do not cite yet.';
   document.getElementById('site-name').innerHTML = 'Census of elliptic and quasielliptic K3 surfaces over ' + tex('\\mathbf{F}_2');
   window.addEventListener('hashchange', route);
   route();

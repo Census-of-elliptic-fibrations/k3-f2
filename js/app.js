@@ -604,7 +604,6 @@ function magmaSnippet(key, p2) {
   //   Output: a string of Magma code
   const d = decodeKey(key);
   const form = (ms) => ms.length ? ms.map(([, e]) => e === 0 ? '1' : e === 1 ? 'T' : `T^${e}`).join(' + ') : '0';
-  const p2Text = polyTerms(p2).map(t => t.replace(/^([+-] )?(-?\d+)u/, '$1$2*u').replace(/\^\{(\d+)\}/, '^$1')).join(' ');
   return `// Surface ${key}: built-in Magma functions only, nothing to load.
 K<T> := RationalFunctionField(GF(2));    // T = t/s
 E := EllipticCurve([ K | ${form(d.a1)}, 0, ${form(d.a3)}, ${form(d.a4)}, ${form(d.a6)} ]);
@@ -616,7 +615,7 @@ AnalyticInformation(E);    // its first entry is the rank of E(K)
 
 // P2 as shown on this page
 Zu<u> := PolynomialRing(Integers());
-P2 := ${p2Text};
+P2 := Zu![${p2.join(',')}];
 Factorization(P2);         // its factors, irreducible over Z
 Slopes(NewtonPolygon(ChangeRing(P2, pAdicRing(2, 500))));    // the 2-adic slopes give the height
 ArtinTateFormula(Parent(P2) ! (u^22 * Evaluate(P2, 1/u)), 2, 1);    // rho(X/F_2) and #Br(X)*|disc NS(X)|`;
